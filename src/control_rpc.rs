@@ -487,7 +487,7 @@ impl ControlRpcClient {
             json!({
                 "runId": self.run_id,
                 "toolCall": {
-                    "id": format!("rust-agent-{}", uuid::Uuid::new_v4()),
+                    "id": format!("takos-agent-{}", uuid::Uuid::new_v4()),
                     "name": name,
                     "arguments": arguments,
                 }

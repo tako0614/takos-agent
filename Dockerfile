@@ -2,14 +2,14 @@ FROM rust:1.94-bookworm AS builder
 
 WORKDIR /work
 
-COPY takos-agent-engine/Cargo.toml /work/takos-agent-engine/Cargo.toml
-COPY takos-agent-engine/Cargo.lock /work/takos-agent-engine/Cargo.lock
-COPY takos-agent-engine/src /work/takos-agent-engine/src
-COPY takos-agent/Cargo.toml /work/takos-agent/Cargo.toml
-COPY takos-agent/Cargo.lock /work/takos-agent/Cargo.lock
-COPY takos-agent/src /work/takos-agent/src
+COPY agent-engine/Cargo.toml /work/agent-engine/Cargo.toml
+COPY agent-engine/Cargo.lock /work/agent-engine/Cargo.lock
+COPY agent-engine/src /work/agent-engine/src
+COPY agent/Cargo.toml /work/agent/Cargo.toml
+COPY agent/Cargo.lock /work/agent/Cargo.lock
+COPY agent/src /work/agent/src
 
-RUN cargo build --manifest-path /work/takos-agent/Cargo.toml --release
+RUN cargo build --manifest-path /work/agent/Cargo.toml --release
 
 FROM debian:bookworm-slim
 
@@ -21,7 +21,7 @@ RUN useradd --create-home --uid 10001 takos
 RUN mkdir -p /var/lib/takos/agent \
   && chown -R takos:takos /var/lib/takos
 
-COPY --from=builder /work/takos-agent/target/release/takos-agent /usr/local/bin/takos-agent
+COPY --from=builder /work/agent/target/release/takos-agent /usr/local/bin/takos-agent
 
 ENV PORT=8080 \
   TAKOS_AGENT_DATA_DIR=/tmp/takos-agent

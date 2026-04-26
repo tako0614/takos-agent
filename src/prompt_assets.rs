@@ -1,5 +1,5 @@
-// This file is generated from takos-paas/packages/control/src/application/services/agent/prompts/*.md.
-// Run `cd takos-paas && deno task generate:agent-prompts` from the ecosystem root after editing prompt markdown.
+// This file is generated from packages/control/src/application/services/agent/prompts/*.md.
+// Run `deno task generate:agent-prompts` from the Takos repository root after editing prompt markdown.
 
 pub const CORE_PROMPT: &str = r#"You are Takos's universal agent. You help with work, projects, writing,
 research, organization, and software tasks by choosing from the tools available

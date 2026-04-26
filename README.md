@@ -75,22 +75,22 @@ run が上限を超えた場合は `503 At capacity` を返します。
 
 ## Repository layout
 
-この repo は ecosystem checkout では sibling の `takos-agent-engine/` を参照します。
+この repo は Takos checkout では sibling の `agent-engine/` を参照します。
 
 ```text
-takos-agent/
+agent/
   Cargo.toml
   Dockerfile
   src/
-takos-agent-engine/
+agent-engine/
   Cargo.toml
   src/
 ```
 
-Docker image は ecosystem root を build context にして作成します。
+Docker image は Takos repository root を build context にして作成します。
 
 ```sh
-docker build -f takos-agent/Dockerfile -t takos-agent .
+docker build -f agent/Dockerfile -t takos-agent .
 ```
 
 - model-visible catalog / tool discovery
