@@ -1,7 +1,7 @@
 # takos-agent
 
-`takos-agent` は Takos の agent execution service です。`takos-agent-engine`
-を Rust library として利用し、agent loop、managed skills の Rust runtime copy、
+`takos-agent` は Takos の agent execution service です。`takos-agent-engine` を
+Rust library として利用し、agent loop、managed skills の Rust runtime copy、
 prompt construction、tool bridge を service process 内で扱います。PaaS/control
 plane とは Control RPC で接続します。
 
@@ -75,22 +75,22 @@ run が上限を超えた場合は `503 At capacity` を返します。
 
 ## Repository layout
 
-この repo は Takos checkout では sibling の `agent-engine/` を参照します。
+この repo は ecosystem checkout では `../../takos-agent-engine/` を参照します。
 
 ```text
 agent/
   Cargo.toml
   Dockerfile
   src/
-agent-engine/
+../../takos-agent-engine/
   Cargo.toml
   src/
 ```
 
-Docker image は Takos repository root を build context にして作成します。
+Docker image は ecosystem root を build context にして作成します。
 
 ```sh
-docker build -f agent/Dockerfile -t takos-agent .
+docker build -f takos/agent/Dockerfile -t takos-agent .
 ```
 
 - model-visible catalog / tool discovery
