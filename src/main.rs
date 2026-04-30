@@ -1,5 +1,6 @@
 mod control_rpc;
 mod engine_support;
+mod internal_rpc;
 mod managed_skills;
 mod model;
 mod prompt_assets;
