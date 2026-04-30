@@ -1,3 +1,4 @@
+use std::env;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -14,7 +15,9 @@ use takos_agent_engine::memory::distillation::{
     DistillationInput, DistillationOutput, Distiller, RawLifecycleUpdate,
 };
 use takos_agent_engine::memory::DefaultScoringPolicy;
-use takos_agent_engine::model::{Embedder, Embedding};
+use takos_agent_engine::model::{
+    Embedder, Embedding, OpenAiCompatibleEmbedder, OpenAiEmbeddingConfig,
+};
 use takos_agent_engine::storage::{
     FileObjectStore, ObjectGraphRepository, ObjectLoopStateRepository, ObjectNodeRepository,
     ObjectVectorIndex, RawLifecyclePatch,
@@ -29,6 +32,17 @@ use crate::model::TakosModelRunner;
 use crate::prompts::system_prompt_for_agent_type;
 use crate::tool_bridge::CompositeToolExecutor;
 use crate::AppResult;
+
+const DEFAULT_OPENAI_EMBEDDING_MODEL: &str = "text-embedding-3-small";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingBackendConfig {
+    pub provider: String,
+    pub model: String,
+    pub base_url: Option<String>,
+    pub api_key: String,
+    pub dimensions: Option<u32>,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct RustWhitespaceTokenEstimator;
@@ -243,8 +257,11 @@ impl Distiller for RustSimpleDistiller {
 
 pub fn build_engine_config(run_config: &RunConfigResponse, agent_type: &str) -> EngineConfig {
     let mut config = EngineConfig::default();
-    let base_prompt = system_prompt_for_agent_type(agent_type);
-    config.system_prompt = base_prompt;
+    config.system_prompt = if run_config.system_prompt.trim().is_empty() {
+        system_prompt_for_agent_type(agent_type)
+    } else {
+        run_config.system_prompt.clone()
+    };
     if let Some(max_graph_steps) = run_config
         .max_graph_steps
         .or(run_config.max_iterations)
@@ -266,13 +283,14 @@ pub fn build_engine_deps(
     root: &Path,
     model_runner: TakosModelRunner,
     tool_executor: CompositeToolExecutor,
+    embedding_config: Option<EmbeddingBackendConfig>,
 ) -> AppResult<EngineDeps> {
     let store = FileObjectStore::open(root)?;
     let repository = Arc::new(ObjectNodeRepository::new(store.clone()));
     let vector_index = Arc::new(ObjectVectorIndex::new(store.clone()));
     let graph_repository = Arc::new(ObjectGraphRepository::new(store.clone()));
     let loop_state_repository = Arc::new(ObjectLoopStateRepository::new(store));
-    let embedder = Arc::new(RustHashEmbedder::default());
+    let embedder = build_embedder(embedding_config)?;
     let scoring_policy = Arc::new(DefaultScoringPolicy::default());
     let token_estimator = Arc::new(RustWhitespaceTokenEstimator);
     let distiller = Arc::new(RustSimpleDistiller);
@@ -296,6 +314,66 @@ pub fn build_engine_deps(
         scoring_policy,
         token_estimator,
     })
+}
+
+pub fn resolve_embedding_backend_config(
+    run_config: &RunConfigResponse,
+    control_openai_api_key: Option<&str>,
+) -> AppResult<Option<EmbeddingBackendConfig>> {
+    resolve_embedding_backend_config_from_values(
+        run_config,
+        control_openai_api_key,
+        EnvEmbeddingConfig {
+            provider: first_nonempty_env(&["TAKOS_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER"]),
+            model: first_nonempty_env(&[
+                "TAKOS_EMBEDDING_MODEL",
+                "EMBEDDING_MODEL",
+                "OPENAI_EMBEDDING_MODEL",
+            ]),
+            base_url: first_nonempty_env(&[
+                "TAKOS_EMBEDDING_BASE_URL",
+                "EMBEDDING_BASE_URL",
+                "OPENAI_EMBEDDING_BASE_URL",
+            ]),
+            api_key: first_nonempty_env(&[
+                "TAKOS_EMBEDDING_API_KEY",
+                "EMBEDDING_API_KEY",
+                "OPENAI_EMBEDDING_API_KEY",
+                "OPENAI_API_KEY",
+            ]),
+            dimensions: first_nonempty_env(&[
+                "TAKOS_EMBEDDING_DIMENSIONS",
+                "EMBEDDING_DIMENSIONS",
+                "OPENAI_EMBEDDING_DIMENSIONS",
+            ])
+            .and_then(|value| value.parse::<u32>().ok()),
+        },
+    )
+}
+
+fn build_embedder(config: Option<EmbeddingBackendConfig>) -> AppResult<Arc<dyn Embedder>> {
+    let Some(config) = config else {
+        return Ok(Arc::new(RustHashEmbedder::default()));
+    };
+
+    let provider = config.provider.trim().to_ascii_lowercase();
+    if !matches!(
+        provider.as_str(),
+        "openai" | "openai-compatible" | "openai_compatible"
+    ) {
+        return Err(format!("unsupported embedding provider {}", config.provider).into());
+    }
+
+    let mut openai_config = OpenAiEmbeddingConfig::new(config.model, config.api_key);
+    if let Some(base_url) = config.base_url {
+        openai_config = openai_config.with_base_url(base_url);
+    }
+    if let Some(dimensions) = config.dimensions {
+        openai_config = openai_config.with_dimensions(dimensions);
+    }
+    Ok(Arc::new(OpenAiCompatibleEmbedder::with_config(
+        openai_config,
+    )?))
 }
 
 pub fn derive_engine_session_id(bootstrap_session_id: Option<&str>, thread_id: &str) -> SessionId {
@@ -356,11 +434,334 @@ pub fn safe_space_path(root: &Path, space_id: &str) -> std::path::PathBuf {
     root.join("spaces").join(slug)
 }
 
+#[derive(Debug, Clone, Default)]
+struct EnvEmbeddingConfig {
+    provider: Option<String>,
+    model: Option<String>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    dimensions: Option<u32>,
+}
+
+fn resolve_embedding_backend_config_from_values(
+    run_config: &RunConfigResponse,
+    control_openai_api_key: Option<&str>,
+    env_config: EnvEmbeddingConfig,
+) -> AppResult<Option<EmbeddingBackendConfig>> {
+    let provider = first_nonempty([
+        env_config.provider.as_deref(),
+        run_config.embedding_provider.as_deref(),
+    ]);
+    if matches!(
+        provider.as_deref().map(str::to_ascii_lowercase).as_deref(),
+        Some("hash" | "local" | "rust-hash")
+    ) {
+        return Ok(None);
+    }
+
+    let model = first_nonempty([
+        env_config.model.as_deref(),
+        run_config.embedding_model.as_deref(),
+    ]);
+    let base_url = first_nonempty([
+        env_config.base_url.as_deref(),
+        run_config.embedding_base_url.as_deref(),
+    ]);
+    let api_key = first_nonempty([
+        env_config.api_key.as_deref(),
+        run_config.embedding_api_key.as_deref(),
+        control_openai_api_key,
+    ]);
+    let dimensions = env_config.dimensions.or(run_config.embedding_dimensions);
+    let openai_configured = provider.is_some()
+        || model.is_some()
+        || base_url.is_some()
+        || api_key.is_some()
+        || dimensions.is_some();
+    if !openai_configured {
+        return Ok(None);
+    }
+
+    let provider = provider.unwrap_or_else(|| "openai-compatible".to_string());
+    let normalized_provider = provider.trim().to_ascii_lowercase();
+    if !matches!(
+        normalized_provider.as_str(),
+        "openai" | "openai-compatible" | "openai_compatible"
+    ) {
+        return Err(format!("unsupported embedding provider {provider}").into());
+    }
+    let api_key = api_key.ok_or("OpenAI-compatible embedding api key is not configured")?;
+
+    Ok(Some(EmbeddingBackendConfig {
+        provider,
+        model: model.unwrap_or_else(|| DEFAULT_OPENAI_EMBEDDING_MODEL.to_string()),
+        base_url,
+        api_key,
+        dimensions,
+    }))
+}
+
+fn first_nonempty_env(keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| env::var(key).ok().and_then(|value| nonempty_string(&value)))
+}
+
+fn first_nonempty<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {
+    values.into_iter().flatten().find_map(nonempty_string)
+}
+
+fn nonempty_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 fn truncate_title(source: &str) -> String {
     let trimmed = source.trim();
     if trimmed.len() <= 64 {
         trimmed.to_string()
     } else {
         format!("{}...", &trimmed[..61])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_embedder, build_engine_config, resolve_embedding_backend_config_from_values,
+        EmbeddingBackendConfig, EnvEmbeddingConfig,
+    };
+    use crate::control_rpc::RunConfigResponse;
+    use crate::prompts::system_prompt_for_agent_type;
+    use serde_json::json;
+    use takos_agent_engine::model::Embedding;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
+
+    #[test]
+    fn build_engine_config_prefers_control_system_prompt() {
+        let config = build_engine_config(
+            &RunConfigResponse {
+                system_prompt: "control prompt".to_string(),
+                ..Default::default()
+            },
+            "implementer",
+        );
+
+        assert_eq!(config.system_prompt, "control prompt");
+    }
+
+    #[test]
+    fn build_engine_config_falls_back_to_local_prompt_when_control_prompt_empty() {
+        let config = build_engine_config(
+            &RunConfigResponse {
+                system_prompt: "  ".to_string(),
+                ..Default::default()
+            },
+            "implementer",
+        );
+
+        assert_eq!(
+            config.system_prompt,
+            system_prompt_for_agent_type("implementer")
+        );
+    }
+
+    #[test]
+    fn build_engine_config_applies_control_budget_fields() {
+        let config = build_engine_config(
+            &RunConfigResponse {
+                max_graph_steps: Some(7),
+                max_tool_rounds: Some(3),
+                ..Default::default()
+            },
+            "implementer",
+        );
+
+        assert_eq!(config.runtime.max_graph_steps, 7);
+        assert_eq!(config.runtime.max_tool_rounds, 3);
+    }
+
+    #[test]
+    fn embedding_backend_config_uses_hash_when_unset() {
+        let config = resolve_embedding_backend_config_from_values(
+            &RunConfigResponse::default(),
+            None,
+            EnvEmbeddingConfig::default(),
+        )
+        .expect("embedding config should resolve");
+
+        assert_eq!(config, None);
+    }
+
+    #[test]
+    fn embedding_backend_config_prefers_env_over_control() {
+        let config = resolve_embedding_backend_config_from_values(
+            &RunConfigResponse {
+                embedding_provider: Some("openai".to_string()),
+                embedding_model: Some("control-model".to_string()),
+                embedding_base_url: Some("https://control.example/v1".to_string()),
+                embedding_api_key: Some("control-key".to_string()),
+                embedding_dimensions: Some(128),
+                ..Default::default()
+            },
+            Some("api-key-from-control-secret"),
+            EnvEmbeddingConfig {
+                provider: Some("openai-compatible".to_string()),
+                model: Some("env-model".to_string()),
+                base_url: Some("https://env.example/v1".to_string()),
+                api_key: Some("env-key".to_string()),
+                dimensions: Some(256),
+            },
+        )
+        .expect("embedding config should resolve")
+        .expect("OpenAI embedding config should be enabled");
+
+        assert_eq!(
+            config,
+            EmbeddingBackendConfig {
+                provider: "openai-compatible".to_string(),
+                model: "env-model".to_string(),
+                base_url: Some("https://env.example/v1".to_string()),
+                api_key: "env-key".to_string(),
+                dimensions: Some(256),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_embedding_backend_sends_request_to_configured_server() {
+        let server =
+            FakeEmbeddingServer::spawn(r#"{"data":[{"index":0,"embedding":[0.25,0.75]}]}"#).await;
+        let embedder = build_embedder(Some(EmbeddingBackendConfig {
+            provider: "openai-compatible".to_string(),
+            model: "embedding-test-model".to_string(),
+            base_url: Some(server.base_url()),
+            api_key: "embedding-test-key".to_string(),
+            dimensions: Some(2),
+        }))
+        .expect("OpenAI embedding backend should build");
+
+        let embedding = embedder
+            .embed_text("agent service wiring")
+            .await
+            .expect("embedding request should succeed");
+
+        assert_eq!(embedding, Embedding(vec![0.25, 0.75]));
+        let request = server.request().await;
+        assert!(request.starts_with("POST /embeddings HTTP/1.1"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("authorization: bearer embedding-test-key"));
+        let body: serde_json::Value =
+            serde_json::from_str(request_body(&request)).expect("request body should be json");
+        assert_eq!(
+            body,
+            json!({
+                "model": "embedding-test-model",
+                "input": "agent service wiring",
+                "dimensions": 2
+            })
+        );
+    }
+
+    struct FakeEmbeddingServer {
+        address: std::net::SocketAddr,
+        handle: JoinHandle<String>,
+    }
+
+    impl FakeEmbeddingServer {
+        async fn spawn(response_body: &'static str) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("fake embedding server should bind");
+            let address = listener
+                .local_addr()
+                .expect("fake embedding server address should resolve");
+            let handle = tokio::spawn(async move {
+                let (mut stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("fake embedding server should accept");
+                let request = read_http_request(&mut stream).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    response_body.len(),
+                    response_body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("fake embedding server should respond");
+                request
+            });
+            Self { address, handle }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://{}", self.address)
+        }
+
+        async fn request(self) -> String {
+            self.handle
+                .await
+                .expect("fake embedding server task should join")
+        }
+    }
+
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> String {
+        let mut buffer = Vec::new();
+        let mut temp = [0; 1024];
+        let header_end;
+        loop {
+            let read = stream.read(&mut temp).await.expect("request should read");
+            assert_ne!(read, 0, "client closed before request headers");
+            buffer.extend_from_slice(&temp[..read]);
+            if let Some(position) = find_header_end(&buffer) {
+                header_end = position;
+                break;
+            }
+        }
+
+        let headers =
+            std::str::from_utf8(&buffer[..header_end]).expect("request headers should be utf8");
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        let body_start = header_end + 4;
+        while buffer.len() < body_start + content_length {
+            let read = stream
+                .read(&mut temp)
+                .await
+                .expect("request body should read");
+            assert_ne!(read, 0, "client closed before request body");
+            buffer.extend_from_slice(&temp[..read]);
+        }
+
+        String::from_utf8(buffer[..body_start + content_length].to_vec())
+            .expect("request should be utf8")
+    }
+
+    fn find_header_end(buffer: &[u8]) -> Option<usize> {
+        buffer.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn request_body(request: &str) -> &str {
+        request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("request should include body")
     }
 }

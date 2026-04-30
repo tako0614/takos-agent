@@ -14,8 +14,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
@@ -28,7 +29,7 @@ use tracing::{error, info, warn};
 use crate::control_rpc::{is_lease_lost, ControlRpcClient, StartPayload, UsagePayload};
 use crate::engine_support::{
     build_engine_config, build_engine_deps, build_session_request, derive_engine_session_id,
-    last_user_message, safe_space_path,
+    last_user_message, resolve_embedding_backend_config, safe_space_path,
 };
 use crate::model::TakosModelRunner;
 use crate::skills::build_skill_catalog;
@@ -180,8 +181,22 @@ async fn health(State(state): State<Arc<ServiceState>>) -> Json<Value> {
 
 async fn start(
     State(state): State<Arc<ServiceState>>,
-    Json(payload): Json<StartPayload>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> (StatusCode, Json<Value>) {
+    if let Err(error) = authorize_start_request(&headers) {
+        return error.into_response();
+    }
+    let payload = match serde_json::from_slice::<StartPayload>(&body) {
+        Ok(payload) => payload,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid start payload" })),
+            );
+        }
+    };
+
     let run_id = payload.run_id.clone();
     let service_id = payload.resolved_service_id().to_string();
     match state.try_register_run(&run_id) {
@@ -226,6 +241,77 @@ async fn start(
             "serviceId": service_id,
         })),
     )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StartAuthError {
+    NotConfigured,
+    Unauthorized,
+}
+
+impl StartAuthError {
+    fn into_response(self) -> (StatusCode, Json<Value>) {
+        match self {
+            Self::NotConfigured => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "start auth token is not configured" })),
+            ),
+            Self::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "missing or invalid start authorization" })),
+            ),
+        }
+    }
+}
+
+fn authorize_start_request(headers: &HeaderMap) -> Result<(), StartAuthError> {
+    authorize_start_with_token(
+        headers,
+        env::var("TAKOS_AGENT_START_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+    )
+}
+
+fn authorize_start_with_token(
+    headers: &HeaderMap,
+    expected_token: Option<String>,
+) -> Result<(), StartAuthError> {
+    let expected_token = expected_token.ok_or(StartAuthError::NotConfigured)?;
+    let Some(actual_token) = read_bearer_token(headers) else {
+        return Err(StartAuthError::Unauthorized);
+    };
+    if constant_time_equal(actual_token, expected_token.trim()) {
+        Ok(())
+    } else {
+        Err(StartAuthError::Unauthorized)
+    }
+}
+
+fn read_bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    if scheme.eq_ignore_ascii_case("bearer") {
+        let token = token.trim();
+        if !token.is_empty() {
+            return Some(token);
+        }
+    }
+    None
+}
+
+fn constant_time_equal(actual: &str, expected: &str) -> bool {
+    let actual = actual.as_bytes();
+    let expected = expected.as_bytes();
+    let len = actual.len().max(expected.len());
+    let mut diff = actual.len() ^ expected.len();
+    for index in 0..len {
+        diff |= usize::from(*actual.get(index).unwrap_or(&0) ^ *expected.get(index).unwrap_or(&0));
+    }
+    diff == 0
 }
 
 async fn execute_run(payload: StartPayload, state: Arc<ServiceState>) -> AppResult<()> {
@@ -285,6 +371,8 @@ async fn execute_run(payload: StartPayload, state: Arc<ServiceState>) -> AppResu
     std::fs::create_dir_all(&store_root)?;
 
     let api_keys = client.api_keys().await.unwrap_or_default();
+    let embedding_config =
+        resolve_embedding_backend_config(&run_config, api_keys.openai.as_deref())?;
     let usage_tracker = Arc::new(engine_support::UsageTracker::default());
     let composite_tool_executor = CompositeToolExecutor::new(
         client.clone(),
@@ -303,6 +391,7 @@ async fn execute_run(payload: StartPayload, state: Arc<ServiceState>) -> AppResu
         &store_root,
         model_runner.clone(),
         composite_tool_executor.clone(),
+        embedding_config,
     )?;
     let request = build_session_request(engine_session_id, user_message, &exposed_tools);
 
@@ -690,10 +779,12 @@ fn parse_max_concurrent_runs(raw: Option<String>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_openai_api_keys, parse_max_concurrent_runs, select_model_tools,
-        user_visible_failure_message, RunAdmission, ServiceState, OPENAI_MAX_TOOL_DEFINITIONS,
+        authorize_start_with_token, collect_openai_api_keys, parse_max_concurrent_runs,
+        select_model_tools, user_visible_failure_message, RunAdmission, ServiceState,
+        StartAuthError, OPENAI_MAX_TOOL_DEFINITIONS,
     };
     use crate::control_rpc::ToolDefinition;
+    use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
     use std::path::PathBuf;
 
     fn tool(name: &str) -> ToolDefinition {
@@ -746,6 +837,32 @@ mod tests {
 
         assert_eq!(keys, vec!["sk-same"]);
         assert!(collect_openai_api_keys(Some("   ".to_string()), None).is_empty());
+    }
+
+    #[test]
+    fn start_auth_requires_configured_bearer_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer start-secret"),
+        );
+
+        assert_eq!(
+            authorize_start_with_token(&headers, Some("start-secret".to_string())),
+            Ok(())
+        );
+        assert_eq!(
+            authorize_start_with_token(&headers, Some("other-secret".to_string())),
+            Err(StartAuthError::Unauthorized)
+        );
+        assert_eq!(
+            authorize_start_with_token(&HeaderMap::new(), Some("start-secret".to_string())),
+            Err(StartAuthError::Unauthorized)
+        );
+        assert_eq!(
+            authorize_start_with_token(&headers, None),
+            Err(StartAuthError::NotConfigured)
+        );
     }
 
     #[test]

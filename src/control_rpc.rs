@@ -1,12 +1,23 @@
-use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::{env, io};
 
 use reqwest::StatusCode;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::AppResult;
+
+const LEGACY_CONTROL_RPC_BASE_URL_ENV_KEYS: &[&str] = &[
+    "TAKOS_LEGACY_CONTROL_RPC_BASE_URL",
+    "CONTROL_RPC_BASE_URL",
+    "TAKOS_CONTROL_RPC_BASE_URL",
+];
+const LEGACY_CONTROL_RPC_TOKEN_ENV_KEYS: &[&str] = &[
+    "TAKOS_LEGACY_CONTROL_RPC_TOKEN",
+    "CONTROL_RPC_TOKEN",
+    "TAKOS_CONTROL_RPC_TOKEN",
+];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -179,6 +190,11 @@ pub struct RunConfigResponse {
     pub max_tool_rounds: Option<u32>,
     pub temperature: Option<f32>,
     pub rate_limit: Option<u32>,
+    pub embedding_provider: Option<String>,
+    pub embedding_model: Option<String>,
+    pub embedding_base_url: Option<String>,
+    pub embedding_api_key: Option<String>,
+    pub embedding_dimensions: Option<u32>,
 }
 
 #[allow(dead_code)]
@@ -237,17 +253,15 @@ impl ControlRpcClient {
         let http = reqwest::Client::builder()
             .user_agent("takos-agent/0.1.0")
             .build()?;
-        let mut base_url = payload.control_rpc_base_url.trim().to_string();
-        while base_url.ends_with('/') {
-            base_url.pop();
-        }
-        if base_url.is_empty() {
-            return Err(io::Error::other("control RPC base URL must not be empty").into());
-        }
+        let (base_url, token) = resolve_control_rpc_config(
+            payload,
+            first_nonempty_env(LEGACY_CONTROL_RPC_BASE_URL_ENV_KEYS),
+            first_nonempty_env(LEGACY_CONTROL_RPC_TOKEN_ENV_KEYS),
+        )?;
         Ok(Self {
             http,
             base_url,
-            token: payload.control_rpc_token.clone(),
+            token,
             run_id: payload.run_id.clone(),
             service_id: payload.resolved_service_id().to_string(),
             lease_version: payload.lease_version,
@@ -308,10 +322,24 @@ impl ControlRpcClient {
             system_prompt: string_field(&payload, &["systemPrompt", "system_prompt"])
                 .unwrap_or_default(),
             max_iterations: u32_field(&payload, &["maxIterations", "max_iterations"]),
-            max_graph_steps: u32_field(&payload, &["max_graph_steps"]),
-            max_tool_rounds: u32_field(&payload, &["max_tool_rounds"]),
+            max_graph_steps: u32_field(&payload, &["maxGraphSteps", "max_graph_steps"]),
+            max_tool_rounds: u32_field(&payload, &["maxToolRounds", "max_tool_rounds"]),
             temperature: f32_field(&payload, &["temperature"]),
             rate_limit: u32_field(&payload, &["rateLimit", "rate_limit"]),
+            embedding_provider: string_field(
+                &payload,
+                &["embeddingProvider", "embedding_provider"],
+            ),
+            embedding_model: string_field(&payload, &["embeddingModel", "embedding_model"]),
+            embedding_base_url: string_field(
+                &payload,
+                &["embeddingBaseUrl", "embeddingBaseURL", "embedding_base_url"],
+            ),
+            embedding_api_key: string_field(&payload, &["embeddingApiKey", "embedding_api_key"]),
+            embedding_dimensions: u32_field(
+                &payload,
+                &["embeddingDimensions", "embedding_dimensions"],
+            ),
         })
     }
 
@@ -636,6 +664,36 @@ impl ControlRpcClient {
     }
 }
 
+fn resolve_control_rpc_config(
+    payload: &StartPayload,
+    env_base_url: Option<String>,
+    env_token: Option<String>,
+) -> AppResult<(String, String)> {
+    let mut base_url = env_base_url
+        .unwrap_or_else(|| payload.control_rpc_base_url.clone())
+        .trim()
+        .to_string();
+    while base_url.ends_with('/') {
+        base_url.pop();
+    }
+    if base_url.is_empty() {
+        return Err(io::Error::other("legacy control RPC base URL must not be empty").into());
+    }
+    let token = env_token
+        .unwrap_or_else(|| payload.control_rpc_token.clone())
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        return Err(io::Error::other("legacy control RPC token must not be empty").into());
+    }
+    Ok((base_url, token))
+}
+
+fn first_nonempty_env(keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| env::var(key).ok().filter(|value| !value.trim().is_empty()))
+}
+
 pub fn is_lease_lost(error: &(dyn std::error::Error + 'static)) -> bool {
     error
         .to_string()
@@ -701,11 +759,15 @@ fn activated_skill_array_field(payload: &Value, keys: &[&str]) -> Vec<ActivatedS
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlRpcClient, StartPayload};
+    use super::{resolve_control_rpc_config, ControlRpcClient, StartPayload};
     use serde_json::json;
+    use std::env;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::Mutex;
     use std::thread;
+
+    static CONTROL_RPC_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[tokio::test]
     async fn control_rpc_client_sends_executor_pool_headers() {
@@ -756,7 +818,7 @@ mod tests {
             String::from_utf8(request).expect("request should be utf8")
         });
 
-        let client = ControlRpcClient::new(&StartPayload {
+        let client = control_rpc_client_with_env_cleared(StartPayload {
             run_id: "run-test".to_string(),
             worker_id: "worker-test".to_string(),
             service_id: Some("service-test".to_string()),
@@ -831,7 +893,7 @@ mod tests {
             String::from_utf8(request).expect("request should be utf8")
         });
 
-        let client = ControlRpcClient::new(&StartPayload {
+        let client = control_rpc_client_with_env_cleared(StartPayload {
             run_id: "run-test".to_string(),
             worker_id: "worker-test".to_string(),
             service_id: Some("service-test".to_string()),
@@ -876,5 +938,193 @@ mod tests {
             parsed["metadata"]["tool_executions"][0]["tool_call_id"],
             "rust-tool-1",
         );
+    }
+
+    #[tokio::test]
+    async fn control_rpc_client_parses_run_config_system_prompt() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener.local_addr().expect("test listener address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test server should accept");
+            let mut buffer = [0_u8; 4096];
+            let mut request = Vec::new();
+            let mut expected_len: Option<usize> = None;
+            loop {
+                let read = stream.read(&mut buffer).expect("request should read");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if expected_len.is_none() {
+                    if let Some(header_end) =
+                        request.windows(4).position(|window| window == b"\r\n\r\n")
+                    {
+                        let headers = String::from_utf8_lossy(&request[..header_end]);
+                        let content_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                if name.eq_ignore_ascii_case("content-length") {
+                                    value.trim().parse::<usize>().ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(0);
+                        expected_len = Some(header_end + 4 + content_len);
+                    }
+                }
+                if expected_len
+                    .map(|length| request.len() >= length)
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+            }
+            let response_body = r#"{"systemPrompt":"control prompt","maxIterations":9,"maxGraphSteps":7,"maxToolRounds":3}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("response should write");
+            String::from_utf8(request).expect("request should be utf8")
+        });
+
+        let client = control_rpc_client_with_env_cleared(StartPayload {
+            run_id: "run-test".to_string(),
+            worker_id: "worker-test".to_string(),
+            service_id: Some("service-test".to_string()),
+            model: Some("local-smoke".to_string()),
+            lease_version: None,
+            executor_tier: None,
+            executor_container_id: None,
+            control_rpc_base_url: format!("http://{address}"),
+            control_rpc_token: "test-token".to_string(),
+        })
+        .expect("control RPC client should build");
+
+        let run_config = client
+            .run_config(Some("implementer"))
+            .await
+            .expect("run config should parse");
+        let request = handle.join().expect("test server should join");
+        let body = request
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .expect("request should include http body");
+        let parsed: serde_json::Value =
+            serde_json::from_str(body).expect("request body should be json");
+
+        assert_eq!(parsed["agentType"], "implementer");
+        assert_eq!(run_config.system_prompt, "control prompt");
+        assert_eq!(run_config.max_iterations, Some(9));
+        assert_eq!(run_config.max_graph_steps, Some(7));
+        assert_eq!(run_config.max_tool_rounds, Some(3));
+    }
+
+    #[test]
+    fn control_rpc_config_prefers_env_values_over_payload_values() {
+        let payload = StartPayload {
+            run_id: "run-test".to_string(),
+            worker_id: "worker-test".to_string(),
+            service_id: Some("service-test".to_string()),
+            model: Some("local-smoke".to_string()),
+            lease_version: None,
+            executor_tier: None,
+            executor_container_id: None,
+            control_rpc_base_url: "https://caller.example/".to_string(),
+            control_rpc_token: "caller-token".to_string(),
+        };
+
+        let (base_url, token) = resolve_control_rpc_config(
+            &payload,
+            Some("https://env.example/base/".to_string()),
+            Some(" env-token ".to_string()),
+        )
+        .expect("control RPC config should resolve");
+
+        assert_eq!(base_url, "https://env.example/base");
+        assert_eq!(token, "env-token");
+    }
+
+    #[test]
+    fn control_rpc_client_keeps_paas_internal_url_separate_from_legacy_rpc() {
+        let _guard = CONTROL_RPC_ENV_LOCK
+            .lock()
+            .expect("env lock should not be poisoned");
+        let saved = saved_control_rpc_env();
+        clear_control_rpc_env();
+        env::set_var("TAKOS_PAAS_INTERNAL_URL", "https://paas.internal");
+
+        let client = ControlRpcClient::new(&StartPayload {
+            run_id: "run-test".to_string(),
+            worker_id: "worker-test".to_string(),
+            service_id: Some("service-test".to_string()),
+            model: Some("local-smoke".to_string()),
+            lease_version: None,
+            executor_tier: None,
+            executor_container_id: None,
+            control_rpc_base_url: "https://legacy-control.example/".to_string(),
+            control_rpc_token: "payload-token".to_string(),
+        })
+        .expect("control RPC client should build");
+
+        restore_control_rpc_env(saved);
+        assert_eq!(client.base_url, "https://legacy-control.example");
+    }
+
+    fn control_rpc_client_with_env_cleared(
+        payload: StartPayload,
+    ) -> crate::AppResult<ControlRpcClient> {
+        let _guard = CONTROL_RPC_ENV_LOCK
+            .lock()
+            .expect("env lock should not be poisoned");
+        let saved = saved_control_rpc_env();
+        clear_control_rpc_env();
+        let result = ControlRpcClient::new(&payload);
+        restore_control_rpc_env(saved);
+        result
+    }
+
+    fn saved_control_rpc_env() -> Vec<(&'static str, Option<String>)> {
+        [
+            "TAKOS_LEGACY_CONTROL_RPC_BASE_URL",
+            "CONTROL_RPC_BASE_URL",
+            "TAKOS_CONTROL_RPC_BASE_URL",
+            "TAKOS_LEGACY_CONTROL_RPC_TOKEN",
+            "CONTROL_RPC_TOKEN",
+            "TAKOS_CONTROL_RPC_TOKEN",
+            "TAKOS_PAAS_INTERNAL_URL",
+        ]
+        .into_iter()
+        .map(|key| (key, env::var(key).ok()))
+        .collect()
+    }
+
+    fn clear_control_rpc_env() {
+        for key in [
+            "TAKOS_LEGACY_CONTROL_RPC_BASE_URL",
+            "CONTROL_RPC_BASE_URL",
+            "TAKOS_CONTROL_RPC_BASE_URL",
+            "TAKOS_LEGACY_CONTROL_RPC_TOKEN",
+            "CONTROL_RPC_TOKEN",
+            "TAKOS_CONTROL_RPC_TOKEN",
+            "TAKOS_PAAS_INTERNAL_URL",
+        ] {
+            env::remove_var(key);
+        }
+    }
+
+    fn restore_control_rpc_env(saved: Vec<(&'static str, Option<String>)>) {
+        for (key, value) in saved {
+            if let Some(value) = value {
+                env::set_var(key, value);
+            } else {
+                env::remove_var(key);
+            }
+        }
     }
 }

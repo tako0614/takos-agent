@@ -68,10 +68,53 @@ stateful backend と tool backend は Workers/TS のまま運用できます。
 pool の token verify / heartbeat / token revoke は Rust container でも同じ
 contract で動きます。
 
+`/start` は executor-host からのみ呼ばれる internal entrypoint です。
+`TAKOS_AGENT_START_TOKEN` を設定し、リクエストには
+`Authorization: Bearer <TAKOS_AGENT_START_TOKEN>` を付けます。未設定時は
+`503`、bearer token が欠落または不一致の場合は `401` を返します。
+
 同時実行上限は `MAX_CONCURRENT_RUNS` で指定します。未設定時の既定値は `5`
 です。executor-host の tiered pool では tier1 に `4`、tier3 に `32`
 を注入します。同じ `runId` の duplicate `/start` は accepted として扱い、別の
 run が上限を超えた場合は `503 At capacity` を返します。
+
+現状の `/rpc/control/*` は PaaS internal API
+`takos/paas/packages/paas-contract/src/internal-api.ts` の contract にはまだ
+存在せず、実装は `takos/app` の executor-host / local executor-host が持つ
+legacy control RPC surface です。そのため agent は PaaS internal API base と
+legacy control RPC base を分けて扱います。
+
+- `TAKOS_LEGACY_CONTROL_RPC_BASE_URL` / `TAKOS_LEGACY_CONTROL_RPC_TOKEN`
+  - `/rpc/control/*` 用の明示的な設定名
+- `CONTROL_RPC_BASE_URL` / `CONTROL_RPC_TOKEN`
+  - 既存の executor-host 互換設定名
+- `TAKOS_CONTROL_RPC_BASE_URL` / `TAKOS_CONTROL_RPC_TOKEN`
+  - 旧互換 alias。新規設定では使わない
+- `/start` payload の `controlRpcBaseUrl` / `controlRpcToken`
+  - executor-host から渡される fallback
+- `TAKOS_PAAS_INTERNAL_URL`
+  - PaaS internal API 用。PaaS に `/rpc/control/*` 相当の contract が追加されるまでは
+    agent の control RPC base としては使わない
+
+PaaS 側へ移す場合は、`takos/paas/packages/paas-contract/src/internal-api.ts`
+に agent control RPC contract を追加し、run bootstrap / context / config /
+tool catalog / tool execute / heartbeat / status update / run event などの
+surface を明示してから agent の呼び先を移行します。
+
+`/rpc/control/run-config` の budget は `maxGraphSteps` / `maxToolRounds`
+を正本の field name として読みます。互換のため `max_graph_steps` /
+`max_tool_rounds` も受け入れます。
+
+memory embedding backend は未設定時に smoke/test 用の Rust hash embedder を使います。
+`/rpc/control/run-config` または env で `embeddingProvider` に `openai` /
+`openai-compatible` を指定すると、`takos-agent-engine` の
+`OpenAiCompatibleEmbedder` を使います。設定名は `embeddingModel` /
+`embeddingBaseUrl` / `embeddingApiKey` / `embeddingDimensions` です。env は
+`TAKOS_EMBEDDING_PROVIDER`、`TAKOS_EMBEDDING_MODEL`、
+`TAKOS_EMBEDDING_BASE_URL`、`TAKOS_EMBEDDING_API_KEY`、
+`TAKOS_EMBEDDING_DIMENSIONS` を優先します。API key は control plane の
+`/rpc/control/api-keys` の OpenAI key、最後に `OPENAI_API_KEY` も fallback
+として使います。
 
 ## Repository layout
 
@@ -110,12 +153,12 @@ docker build -f takos/agent/Dockerfile -t takos-agent .
 - remote
   - Takos control plane が catalog / execution を提供する tool 群
 
-tool discovery は control plane の catalog を正としつつ、`skill_list` /
-`skill_get` / `skill_context` / `skill_catalog` / `skill_describe` は Rust 側で
-local intercept して、managed skill と custom skill の合成結果を返します。local
-memory tools と `skill_*` は model-visible catalog に直接追加されるとは限らず、
-remote catalog の同名 call や local execution path を Rust container が
-intercept / execute します。`skill_*` は managed / custom skill synthesis の
-local intercept です。同名 tool がある場合に local execution が優先されるのは
-runtime dispatch の話であって、`exposed_tools()` が local tools を常に返す
-という意味ではありません。
+tool discovery は control plane の catalog を正としつつ、`skill_*` の実行は
+Rust 側で local intercept します。`skill_list` / `skill_get` は legacy custom
+skill lookup として custom skill のみを返します。managed skill を含む合成 catalog
+は `skill_context` / `skill_catalog` / `skill_describe` が返します。local memory
+tools と `skill_*` は model-visible catalog に直接追加されるとは限らず、remote
+catalog の同名 call や local execution path を Rust container が intercept /
+execute します。同名 tool がある場合に local execution が優先されるのは runtime
+dispatch の話であって、`exposed_tools()` が local tools を常に返すという意味では
+ありません。
