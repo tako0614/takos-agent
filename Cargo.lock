@@ -1186,6 +1186,7 @@ dependencies = [
 [[package]]
 name = "takos-agent-engine"
 version = "0.1.0"
+source = "git+https://github.com/tako0614/takos-agent-engine?rev=448407aafb346ba8982106540dc87b176e0cf3c3#448407aafb346ba8982106540dc87b176e0cf3c3"
 dependencies = [
  "async-trait",
  "chrono",
