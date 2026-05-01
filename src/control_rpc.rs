@@ -8,16 +8,19 @@ use serde_json::{json, Value};
 
 use crate::AppResult;
 
-const LEGACY_CONTROL_RPC_BASE_URL_ENV_KEYS: &[&str] = &[
+const CONTROL_RPC_BASE_URL_ENV_KEYS: &[&str] = &[
+    "TAKOS_AGENT_CONTROL_RPC_BASE_URL",
     "TAKOS_LEGACY_CONTROL_RPC_BASE_URL",
     "CONTROL_RPC_BASE_URL",
     "TAKOS_CONTROL_RPC_BASE_URL",
 ];
-const LEGACY_CONTROL_RPC_TOKEN_ENV_KEYS: &[&str] = &[
+const CONTROL_RPC_TOKEN_ENV_KEYS: &[&str] = &[
+    "TAKOS_AGENT_CONTROL_RPC_TOKEN",
     "TAKOS_LEGACY_CONTROL_RPC_TOKEN",
     "CONTROL_RPC_TOKEN",
     "TAKOS_CONTROL_RPC_TOKEN",
 ];
+const AGENT_CONTROL_RPC_PATH_PREFIX: &str = "/api/internal/v1/agent-control";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -255,8 +258,8 @@ impl ControlRpcClient {
             .build()?;
         let (base_url, token) = resolve_control_rpc_config(
             payload,
-            first_nonempty_env(LEGACY_CONTROL_RPC_BASE_URL_ENV_KEYS),
-            first_nonempty_env(LEGACY_CONTROL_RPC_TOKEN_ENV_KEYS),
+            first_nonempty_env(CONTROL_RPC_BASE_URL_ENV_KEYS),
+            first_nonempty_env(CONTROL_RPC_TOKEN_ENV_KEYS),
         )?;
         Ok(Self {
             http,
@@ -289,8 +292,8 @@ impl ControlRpcClient {
     }
 
     pub async fn run_bootstrap(&self) -> AppResult<RunBootstrap> {
-        self.post_json(
-            "/rpc/control/run-bootstrap",
+        self.post_control_json(
+            "run-bootstrap",
             json!({
                 "runId": self.run_id,
             }),
@@ -299,8 +302,8 @@ impl ControlRpcClient {
     }
 
     pub async fn run_context(&self) -> AppResult<RunContext> {
-        self.post_json(
-            "/rpc/control/run-context",
+        self.post_control_json(
+            "run-context",
             json!({
                 "runId": self.run_id,
             }),
@@ -310,8 +313,8 @@ impl ControlRpcClient {
 
     pub async fn run_config(&self, agent_type: Option<&str>) -> AppResult<RunConfigResponse> {
         let payload: Value = self
-            .post_json(
-                "/rpc/control/run-config",
+            .post_control_json(
+                "run-config",
                 json!({
                     "runId": self.run_id,
                     "agentType": agent_type.unwrap_or("default"),
@@ -349,8 +352,8 @@ impl ControlRpcClient {
         space_id: &str,
         ai_model: &str,
     ) -> AppResult<ConversationHistoryResponse> {
-        self.post_json(
-            "/rpc/control/conversation-history",
+        self.post_control_json(
+            "conversation-history",
             json!({
                 "runId": self.run_id,
                 "threadId": thread_id,
@@ -371,8 +374,8 @@ impl ControlRpcClient {
         available_tool_names: &[String],
     ) -> AppResult<SkillPlanResponse> {
         let payload: Value = self
-            .post_json(
-                "/rpc/control/skill-plan",
+            .post_control_json(
+                "skill-plan",
                 json!({
                     "runId": self.run_id,
                     "threadId": thread_id,
@@ -410,8 +413,8 @@ impl ControlRpcClient {
         available_tool_names: &[String],
     ) -> AppResult<SkillCatalogResponse> {
         let payload: Value = self
-            .post_json(
-                "/rpc/control/skill-catalog",
+            .post_control_json(
+                "skill-catalog",
                 json!({
                     "runId": self.run_id,
                     "threadId": thread_id,
@@ -456,8 +459,8 @@ impl ControlRpcClient {
         available_tool_names: &[String],
     ) -> AppResult<SkillRuntimeContextResponse> {
         let payload: Value = self
-            .post_json(
-                "/rpc/control/skill-runtime-context",
+            .post_control_json(
+                "skill-runtime-context",
                 json!({
                     "runId": self.run_id,
                     "threadId": thread_id,
@@ -500,8 +503,8 @@ impl ControlRpcClient {
     }
 
     pub async fn tool_catalog(&self) -> AppResult<ToolCatalogResponse> {
-        self.post_json(
-            "/rpc/control/tool-catalog",
+        self.post_control_json(
+            "tool-catalog",
             json!({
                 "runId": self.run_id,
             }),
@@ -510,8 +513,8 @@ impl ControlRpcClient {
     }
 
     pub async fn tool_execute(&self, name: &str, arguments: Value) -> AppResult<RpcToolResult> {
-        self.post_json(
-            "/rpc/control/tool-execute",
+        self.post_control_json(
+            "tool-execute",
             json!({
                 "runId": self.run_id,
                 "toolCall": {
@@ -526,8 +529,8 @@ impl ControlRpcClient {
 
     pub async fn tool_cleanup(&self) -> AppResult<()> {
         let _: Value = self
-            .post_json(
-                "/rpc/control/tool-cleanup",
+            .post_control_json(
+                "tool-cleanup",
                 json!({
                     "runId": self.run_id,
                 }),
@@ -538,8 +541,8 @@ impl ControlRpcClient {
 
     pub async fn heartbeat(&self) -> AppResult<()> {
         let _: Value = self
-            .post_json(
-                "/rpc/control/heartbeat",
+            .post_control_json(
+                "heartbeat",
                 json!({
                     "runId": self.run_id,
                     "workerId": self.service_id,
@@ -552,8 +555,8 @@ impl ControlRpcClient {
     }
 
     pub async fn api_keys(&self) -> AppResult<ApiKeysResponse> {
-        self.post_json(
-            "/rpc/control/api-keys",
+        self.post_control_json(
+            "api-keys",
             json!({
                 "runId": self.run_id,
             }),
@@ -583,7 +586,7 @@ impl ControlRpcClient {
         if let Some(metadata) = metadata {
             body["metadata"] = metadata;
         }
-        let _: Value = self.post_json("/rpc/control/add-message", body).await?;
+        let _: Value = self.post_control_json("add-message", body).await?;
         Ok(())
     }
 
@@ -595,8 +598,8 @@ impl ControlRpcClient {
         error: Option<&str>,
     ) -> AppResult<()> {
         let _: Value = self
-            .post_json(
-                "/rpc/control/update-run-status",
+            .post_control_json(
+                "update-run-status",
                 json!({
                     "runId": self.run_id,
                     "status": status,
@@ -611,8 +614,8 @@ impl ControlRpcClient {
 
     pub async fn emit_run_event(&self, event_type: &str, data: Value) -> AppResult<()> {
         let _: Value = self
-            .post_json(
-                "/rpc/control/run-event",
+            .post_control_json(
+                "run-event",
                 json!({
                     "runId": self.run_id,
                     "type": event_type,
@@ -622,6 +625,19 @@ impl ControlRpcClient {
             )
             .await?;
         Ok(())
+    }
+
+    async fn post_control_json<T: DeserializeOwned>(
+        &self,
+        endpoint: &str,
+        body: Value,
+    ) -> AppResult<T> {
+        let path = format!(
+            "{}/{}",
+            AGENT_CONTROL_RPC_PATH_PREFIX,
+            endpoint.trim_start_matches('/')
+        );
+        self.post_json(&path, body).await
     }
 
     async fn post_json<T: DeserializeOwned>(&self, path: &str, body: Value) -> AppResult<T> {
@@ -677,14 +693,14 @@ fn resolve_control_rpc_config(
         base_url.pop();
     }
     if base_url.is_empty() {
-        return Err(io::Error::other("legacy control RPC base URL must not be empty").into());
+        return Err(io::Error::other("agent control RPC base URL must not be empty").into());
     }
     let token = env_token
         .unwrap_or_else(|| payload.control_rpc_token.clone())
         .trim()
         .to_string();
     if token.is_empty() {
-        return Err(io::Error::other("legacy control RPC token must not be empty").into());
+        return Err(io::Error::other("agent control RPC token must not be empty").into());
     }
     Ok((base_url, token))
 }
@@ -836,6 +852,7 @@ mod tests {
         let normalized = request.to_ascii_lowercase();
 
         assert!(normalized.contains("authorization: bearer test-token\r\n"));
+        assert!(request.starts_with("POST /api/internal/v1/agent-control/heartbeat HTTP/1.1"));
         assert!(normalized.contains("x-takos-run-id: run-test\r\n"));
         assert!(normalized.contains("x-takos-executor-tier: 3\r\n"));
         assert!(
@@ -1092,8 +1109,10 @@ mod tests {
     fn saved_control_rpc_env() -> Vec<(&'static str, Option<String>)> {
         [
             "TAKOS_LEGACY_CONTROL_RPC_BASE_URL",
+            "TAKOS_AGENT_CONTROL_RPC_BASE_URL",
             "CONTROL_RPC_BASE_URL",
             "TAKOS_CONTROL_RPC_BASE_URL",
+            "TAKOS_AGENT_CONTROL_RPC_TOKEN",
             "TAKOS_LEGACY_CONTROL_RPC_TOKEN",
             "CONTROL_RPC_TOKEN",
             "TAKOS_CONTROL_RPC_TOKEN",
@@ -1107,8 +1126,10 @@ mod tests {
     fn clear_control_rpc_env() {
         for key in [
             "TAKOS_LEGACY_CONTROL_RPC_BASE_URL",
+            "TAKOS_AGENT_CONTROL_RPC_BASE_URL",
             "CONTROL_RPC_BASE_URL",
             "TAKOS_CONTROL_RPC_BASE_URL",
+            "TAKOS_AGENT_CONTROL_RPC_TOKEN",
             "TAKOS_LEGACY_CONTROL_RPC_TOKEN",
             "CONTROL_RPC_TOKEN",
             "TAKOS_CONTROL_RPC_TOKEN",

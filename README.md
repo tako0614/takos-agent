@@ -13,7 +13,7 @@ agent-control RPC と接続します。
 - skill catalog 合成と selection
 - skill prompt / system prompt 構築
 - model runner wiring
-- control plane との RPC client
+- PaaS control plane との agent-control RPC client
 - remote tool 実行の bridge
 
 ## 境界
@@ -44,7 +44,7 @@ stateful backend と tool backend は PaaS / control plane 側で運用できま
 ## 主要モジュール
 
 - `src/main.rs`
-  - `/start` entrypoint。control RPC から bootstrap して agent loop を起動
+  - `/start` entrypoint。PaaS-owned agent-control RPC から bootstrap して agent loop を起動
 - `src/engine_support.rs`
   - agent engine support wiring
 - `src/skills.rs`
@@ -63,7 +63,7 @@ stateful backend と tool backend は PaaS / control plane 側で運用できま
 `takos-agent` は remote tool backend を内包しません。tool 実行は次の 2 層です。
 
 `/start` は executor pool host から渡される `executorTier` / `executorContainerId`
-を受け取り、全 Control RPC に `X-Takos-Executor-Tier` /
+を受け取り、全 agent-control RPC に `X-Takos-Executor-Tier` /
 `X-Takos-Executor-Container-Id` として転送します。 これにより tiered executor
 pool の token verify / heartbeat / token revoke は Rust container でも同じ
 contract で動きます。
@@ -78,14 +78,16 @@ contract で動きます。
 を注入します。同じ `runId` の duplicate `/start` は accepted として扱い、別の
 run が上限を超えた場合は `503 At capacity` を返します。
 
-agent-control RPC の ownership target は PaaS internal API
-`takos/paas/packages/paas-contract/src/internal-api.ts` の contract export です。
-現状の `/rpc/control/*` はその contract へ完全移行する前の legacy control RPC
-surface も扱うため、agent は PaaS internal API base と legacy control RPC base
-を分けて扱います。
+agent-control RPC の canonical path は PaaS contract export
+`takos/paas/packages/paas-contract/src/agent-control.ts` の
+`/api/internal/v1/agent-control/*` です。`takos-agent` はこの path family を
+一次 surface として呼びます。executor-host / PaaS control plane 側は移行互換の
+ため `/rpc/control/*` alias も受け付けますが、新規実装では増やしません。
 
+- `TAKOS_AGENT_CONTROL_RPC_BASE_URL` / `TAKOS_AGENT_CONTROL_RPC_TOKEN`
+  - `/api/internal/v1/agent-control/*` 用の明示的な設定名
 - `TAKOS_LEGACY_CONTROL_RPC_BASE_URL` / `TAKOS_LEGACY_CONTROL_RPC_TOKEN`
-  - `/rpc/control/*` 用の明示的な設定名
+  - 旧 `/rpc/control/*` 時代の互換設定名
 - `CONTROL_RPC_BASE_URL` / `CONTROL_RPC_TOKEN`
   - 既存の互換設定名
 - `TAKOS_CONTROL_RPC_BASE_URL` / `TAKOS_CONTROL_RPC_TOKEN`
@@ -93,25 +95,25 @@ surface も扱うため、agent は PaaS internal API base と legacy control RP
 - `/start` payload の `controlRpcBaseUrl` / `controlRpcToken`
   - executor pool host から渡される fallback
 - `TAKOS_PAAS_INTERNAL_URL`
-  - PaaS internal API 用。PaaS に `/rpc/control/*` 相当の contract が追加されるまでは
-    agent の control RPC base としては使わない
+  - tenant/platform PaaS internal API 用。agent-control RPC の bearer-token transport
+    base としては使わない
 
 PaaS 側の contract export では、run bootstrap / context / config / tool catalog /
 tool execute / heartbeat / status update / run event などの surface を明示します。
 
-`/rpc/control/run-config` の budget は `maxGraphSteps` / `maxToolRounds`
+`/api/internal/v1/agent-control/run-config` の budget は `maxGraphSteps` / `maxToolRounds`
 を正本の field name として読みます。互換のため `max_graph_steps` /
 `max_tool_rounds` も受け入れます。
 
 memory embedding backend は未設定時に smoke/test 用の Rust hash embedder を使います。
-`/rpc/control/run-config` または env で `embeddingProvider` に `openai` /
+`/api/internal/v1/agent-control/run-config` または env で `embeddingProvider` に `openai` /
 `openai-compatible` を指定すると、`takos-agent-engine` の
 `OpenAiCompatibleEmbedder` を使います。設定名は `embeddingModel` /
 `embeddingBaseUrl` / `embeddingApiKey` / `embeddingDimensions` です。env は
 `TAKOS_EMBEDDING_PROVIDER`、`TAKOS_EMBEDDING_MODEL`、
 `TAKOS_EMBEDDING_BASE_URL`、`TAKOS_EMBEDDING_API_KEY`、
 `TAKOS_EMBEDDING_DIMENSIONS` を優先します。API key は control plane の
-`/rpc/control/api-keys` の OpenAI key、最後に `OPENAI_API_KEY` も fallback
+`/api/internal/v1/agent-control/api-keys` の OpenAI key、最後に `OPENAI_API_KEY` も fallback
 として使います。
 
 ## Repository layout
@@ -130,6 +132,13 @@ Docker image は agent repo root を build context にして作成します。
 
 ```sh
 docker build -t takos-agent .
+```
+
+Live smoke は opt-in です。`TAKOS_AGENT_INTERNAL_URL` が未設定の場合は skip
+します。設定されている場合だけ `GET /health` を確認します。
+
+```sh
+bash scripts/live-smoke.sh
 ```
 
 `takos-agent-engine` を local checkout で検証する場合は、一時的に次の patch を

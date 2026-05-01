@@ -11,6 +11,10 @@ use crate::control_rpc::{ToolDefinition, UsagePayload};
 use crate::engine_support::UsageTracker;
 use crate::AppResult;
 
+/// Default OpenAI Chat Completions endpoint. Centralised so the `mock-llm`
+/// feature can override it without editing the production code path.
+const DEFAULT_OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
+
 #[derive(Clone)]
 pub struct TakosModelRunner {
     client: reqwest::Client,
@@ -19,6 +23,7 @@ pub struct TakosModelRunner {
     openai_api_keys: Arc<Vec<String>>,
     tools: Arc<Vec<ToolDefinition>>,
     usage_tracker: Arc<UsageTracker>,
+    endpoint: Arc<String>,
 }
 
 impl TakosModelRunner {
@@ -53,6 +58,31 @@ impl TakosModelRunner {
             openai_api_keys: Arc::new(sanitize_api_keys(openai_api_keys)),
             tools: Arc::new(tools),
             usage_tracker,
+            endpoint: Arc::new(DEFAULT_OPENAI_ENDPOINT.to_string()),
+        }
+    }
+
+    /// Phase 20E test-only constructor: route Chat Completions calls at a
+    /// caller-supplied endpoint (e.g. a local mock OpenAI stub) instead of
+    /// the public OpenAI API. The flag is gated on the `mock-llm` Cargo
+    /// feature so production builds never expose the alternate path.
+    #[cfg(any(test, feature = "mock-llm"))]
+    pub fn new_with_endpoint(
+        endpoint: impl Into<String>,
+        model: impl Into<String>,
+        temperature: Option<f32>,
+        openai_api_keys: Vec<String>,
+        tools: Vec<ToolDefinition>,
+        usage_tracker: Arc<UsageTracker>,
+    ) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            model: model.into(),
+            temperature,
+            openai_api_keys: Arc::new(sanitize_api_keys(openai_api_keys)),
+            tools: Arc::new(tools),
+            usage_tracker,
+            endpoint: Arc::new(endpoint.into()),
         }
     }
 
@@ -192,7 +222,7 @@ impl TakosModelRunner {
     ) -> AppResult<ModelOutput> {
         let response = self
             .client
-            .post("https://api.openai.com/v1/chat/completions")
+            .post(self.endpoint.as_str())
             .bearer_auth(api_key)
             .json(&self.build_openai_request(input))
             .send()

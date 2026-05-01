@@ -6,6 +6,14 @@ publish = false
 license = "AGPL-3.0-only"
 description = "Agent execution service for Takos"
 
+[features]
+default = []
+# Phase 20E: enable test-only constructors that point the model runner at a
+# local HTTP stub server instead of the public OpenAI endpoint. The flag is
+# only consumed by `tests/agent_mock_llm_test.rs`; production builds never
+# compile the alternate constructor.
+mock-llm = []
+
 [dependencies]
 async-trait = "0.1.89"
 axum = { version = "0.7.9", features = ["json", "macros"] }
