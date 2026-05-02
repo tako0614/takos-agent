@@ -81,19 +81,19 @@ pub fn sign_internal_rpc(input: InternalRpcSignInput<'_>) -> Result<SignedIntern
     let body_digest = sha256_hex(input.body);
     let request_id = input.request_id.unwrap_or(&input.actor.request_id);
     let capabilities = normalize_capabilities(input.capabilities);
-    let canonical = canonical_internal_rpc(
-        input.method,
-        input.path,
-        input.query,
-        input.timestamp,
+    let canonical = canonical_internal_rpc(CanonicalInternalRpcParts {
+        method: input.method,
+        path: input.path,
+        query: input.query,
+        timestamp: input.timestamp,
         request_id,
-        input.nonce,
-        input.caller,
-        input.audience,
-        &capabilities,
-        &body_digest,
-        &actor_context,
-    );
+        nonce: input.nonce,
+        caller: input.caller,
+        audience: input.audience,
+        capabilities: &capabilities,
+        body_digest: &body_digest,
+        actor_context: &actor_context,
+    });
     let signature = hmac_sha256_hex(input.secret, &canonical)?;
     Ok(SignedInternalRpc {
         headers: vec![
@@ -144,7 +144,7 @@ pub fn verify_internal_rpc(
     }
     let caller = caller.unwrap();
     if let Some(expected) = input.expected_caller {
-        if !expected.iter().any(|value| *value == caller) {
+        if !expected.contains(&caller) {
             return Ok(None);
         }
     }
@@ -172,19 +172,19 @@ pub fn verify_internal_rpc(
     if actor.request_id != request_id {
         return Ok(None);
     }
-    let canonical = canonical_internal_rpc(
-        input.method,
-        input.path,
-        input.query,
+    let canonical = canonical_internal_rpc(CanonicalInternalRpcParts {
+        method: input.method,
+        path: input.path,
+        query: input.query,
         timestamp,
         request_id,
-        nonce.unwrap(),
+        nonce: nonce.unwrap(),
         caller,
         audience,
-        &capabilities,
+        capabilities: &capabilities,
         body_digest,
         actor_context,
-    );
+    });
     let expected_signature = hmac_sha256_hex(input.secret, &canonical)?;
     if !constant_time_eq(&expected_signature, signature.unwrap()) {
         return Ok(None);
@@ -200,31 +200,33 @@ pub fn verify_internal_rpc(
     }))
 }
 
-fn canonical_internal_rpc(
-    method: &str,
-    path: &str,
-    query: Option<&str>,
-    timestamp: &str,
-    request_id: &str,
-    nonce: &str,
-    caller: &str,
-    audience: &str,
-    capabilities: &[String],
-    body_digest: &str,
-    actor_context: &str,
-) -> String {
+struct CanonicalInternalRpcParts<'a> {
+    method: &'a str,
+    path: &'a str,
+    query: Option<&'a str>,
+    timestamp: &'a str,
+    request_id: &'a str,
+    nonce: &'a str,
+    caller: &'a str,
+    audience: &'a str,
+    capabilities: &'a [String],
+    body_digest: &'a str,
+    actor_context: &'a str,
+}
+
+fn canonical_internal_rpc(parts: CanonicalInternalRpcParts<'_>) -> String {
     [
         TAKOS_INTERNAL_RPC_VERSION,
-        &method.to_uppercase(),
-        &path_with_query(path, query),
-        timestamp,
-        request_id,
-        nonce,
-        caller,
-        audience,
-        &capabilities.join(","),
-        body_digest,
-        actor_context,
+        &parts.method.to_uppercase(),
+        &path_with_query(parts.path, parts.query),
+        parts.timestamp,
+        parts.request_id,
+        parts.nonce,
+        parts.caller,
+        parts.audience,
+        &parts.capabilities.join(","),
+        parts.body_digest,
+        parts.actor_context,
     ]
     .join("\n")
 }

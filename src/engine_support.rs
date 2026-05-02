@@ -256,11 +256,13 @@ impl Distiller for RustSimpleDistiller {
 }
 
 pub fn build_engine_config(run_config: &RunConfigResponse, agent_type: &str) -> EngineConfig {
-    let mut config = EngineConfig::default();
-    config.system_prompt = if run_config.system_prompt.trim().is_empty() {
-        system_prompt_for_agent_type(agent_type)
-    } else {
-        run_config.system_prompt.clone()
+    let mut config = EngineConfig {
+        system_prompt: if run_config.system_prompt.trim().is_empty() {
+            system_prompt_for_agent_type(agent_type)
+        } else {
+            run_config.system_prompt.clone()
+        },
+        ..EngineConfig::default()
     };
     if let Some(max_graph_steps) = run_config
         .max_graph_steps
@@ -421,7 +423,7 @@ pub fn build_session_request(
 }
 
 pub fn safe_space_path(root: &Path, space_id: &str) -> std::path::PathBuf {
-    let slug = space_id
+    let mut slug = space_id
         .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
@@ -431,6 +433,9 @@ pub fn safe_space_path(root: &Path, space_id: &str) -> std::path::PathBuf {
             }
         })
         .collect::<String>();
+    if slug.is_empty() || slug == "." || slug == ".." {
+        slug = "_".to_string();
+    }
     root.join("spaces").join(slug)
 }
 
