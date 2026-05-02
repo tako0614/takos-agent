@@ -228,8 +228,12 @@ async fn start(
     let run_id_for_task = run_id.clone();
     let state_for_task = state.clone();
     tokio::spawn(async move {
-        if let Err(err) = execute_run(payload_for_task, state_for_task.clone()).await {
+        if let Err(err) = execute_run(payload_for_task.clone(), state_for_task.clone()).await {
             error!(error = %err, "run execution failed");
+            if let Ok(client) = ControlRpcClient::new(&payload_for_task) {
+                let _ = client.tool_cleanup().await;
+                let _ = handle_failure(&client, None, err.as_ref(), UsagePayload::default()).await;
+            }
         }
         state_for_task.finish_run(&run_id_for_task);
     });
@@ -582,15 +586,16 @@ async fn handle_success(
 async fn handle_failure(
     client: &ControlRpcClient,
     thread_id: Option<&str>,
-    err: &impl std::fmt::Display,
+    err: &(impl std::fmt::Display + ?Sized),
     usage: UsagePayload,
 ) -> AppResult<()> {
-    let error_message = err.to_string();
-    let status = if error_message.contains("operation cancelled") {
+    let raw_error_message = err.to_string();
+    let status = if raw_error_message.contains("operation cancelled") {
         "cancelled"
     } else {
         "failed"
     };
+    let error_message = sanitize_failure_error_message(&raw_error_message);
     client
         .update_run_status(status, usage.clone(), None, Some(&error_message))
         .await?;
@@ -638,6 +643,20 @@ async fn handle_failure(
         .await
         .ok();
     Ok(())
+}
+
+fn sanitize_failure_error_message(message: &str) -> String {
+    message
+        .split_whitespace()
+        .map(|part| {
+            if part.contains("sk-") {
+                "<redacted>"
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn user_visible_failure_message(error: &str) -> String {
@@ -781,12 +800,13 @@ fn parse_max_concurrent_runs(raw: Option<String>) -> usize {
 mod tests {
     use super::{
         authorize_start_with_token, collect_openai_api_keys, parse_max_concurrent_runs,
-        select_model_tools, user_visible_failure_message, RunAdmission, ServiceState,
-        StartAuthError, OPENAI_MAX_TOOL_DEFINITIONS,
+        sanitize_failure_error_message, select_model_tools, user_visible_failure_message,
+        RunAdmission, ServiceState, StartAuthError, OPENAI_MAX_TOOL_DEFINITIONS,
     };
     use crate::control_rpc::ToolDefinition;
+    use crate::engine_support::safe_space_path;
     use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn tool(name: &str) -> ToolDefinition {
         ToolDefinition {
@@ -819,6 +839,35 @@ mod tests {
         let message = user_visible_failure_message("OpenAI API key is not configured");
         assert!(message.contains("no OpenAI API key is configured"));
         assert!(message.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn persisted_failure_message_redacts_secret_like_tokens() {
+        let message = sanitize_failure_error_message(
+            "OpenAI chat completions failed: 401 {\"message\":\"sk-secret\"}",
+        );
+        assert!(!message.contains("sk-secret"));
+        assert!(message.contains("<redacted>"));
+    }
+
+    #[test]
+    fn safe_space_path_rejects_reserved_dot_segments() {
+        let root = PathBuf::from("/tmp/takos-agent-test");
+
+        assert_eq!(
+            safe_space_path(&root, ".").strip_prefix(&root).unwrap(),
+            Path::new("spaces/_"),
+        );
+        assert_eq!(
+            safe_space_path(&root, "..").strip_prefix(&root).unwrap(),
+            Path::new("spaces/_"),
+        );
+        assert_eq!(
+            safe_space_path(&root, "../space")
+                .strip_prefix(&root)
+                .unwrap(),
+            Path::new("spaces/.._space"),
+        );
     }
 
     #[test]

@@ -67,6 +67,7 @@ impl TakosModelRunner {
     /// the public OpenAI API. The flag is gated on the `mock-llm` Cargo
     /// feature so production builds never expose the alternate path.
     #[cfg(any(test, feature = "mock-llm"))]
+    #[allow(dead_code)]
     pub fn new_with_endpoint(
         endpoint: impl Into<String>,
         model: impl Into<String>,
@@ -95,7 +96,7 @@ impl TakosModelRunner {
     }
 
     fn use_local_smoke(&self) -> bool {
-        self.model == "local-smoke" || self.openai_api_keys.is_empty()
+        self.model == "local-smoke"
     }
 
     fn build_runner_prompt(&self, input: &ModelInput) -> String {
@@ -233,7 +234,8 @@ impl TakosModelRunner {
         if !status.is_success() {
             return Err(io::Error::other(format!(
                 "OpenAI chat completions failed: {} {}",
-                status, text
+                status,
+                sanitize_provider_error_body(&text)
             ))
             .into());
         }
@@ -242,6 +244,24 @@ impl TakosModelRunner {
     }
 
     fn build_openai_request(&self, input: &ModelInput) -> OpenAiChatCompletionRequest {
+        let tools = self
+            .tools
+            .iter()
+            .map(|tool| OpenAiToolDefinition {
+                r#type: "function".to_string(),
+                function: OpenAiToolSpec {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    parameters: tool.parameters.clone(),
+                },
+            })
+            .collect::<Vec<_>>();
+        let tool_choice = if tools.is_empty() {
+            None
+        } else {
+            Some("auto".to_string())
+        };
+
         OpenAiChatCompletionRequest {
             model: self.model.clone(),
             temperature: self.temperature,
@@ -255,19 +275,8 @@ impl TakosModelRunner {
                     content: Some(Value::String(self.build_runner_prompt(input))),
                 },
             ],
-            tools: self
-                .tools
-                .iter()
-                .map(|tool| OpenAiToolDefinition {
-                    r#type: "function".to_string(),
-                    function: OpenAiToolSpec {
-                        name: tool.name.clone(),
-                        description: tool.description.clone(),
-                        parameters: tool.parameters.clone(),
-                    },
-                })
-                .collect(),
-            tool_choice: Some("auto".to_string()),
+            tools,
+            tool_choice,
         }
     }
 
@@ -369,6 +378,34 @@ fn is_openai_auth_failure(error: &str) -> bool {
         || normalized.contains("incorrect api key")
 }
 
+fn sanitize_provider_error_body(body: &str) -> String {
+    let redacted = redact_secret_like_tokens(body);
+    const MAX_ERROR_BODY_CHARS: usize = 512;
+    if redacted.chars().count() <= MAX_ERROR_BODY_CHARS {
+        return redacted;
+    }
+    let mut truncated = redacted
+        .chars()
+        .take(MAX_ERROR_BODY_CHARS)
+        .collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn redact_secret_like_tokens(input: &str) -> String {
+    input
+        .split_whitespace()
+        .map(|part| {
+            if part.contains("sk-") {
+                "<redacted>"
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn flatten_message_content(content: Option<Value>) -> Option<String> {
     let content = content?;
     match content {
@@ -467,7 +504,15 @@ struct OpenAiUsage {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_openai_auth_failure, sanitize_api_keys};
+    use std::sync::Arc;
+
+    use takos_agent_engine::model::{ModelInput, ModelRunner};
+    use takos_agent_engine::{LoopId, SessionId};
+
+    use super::{
+        is_openai_auth_failure, sanitize_api_keys, sanitize_provider_error_body, TakosModelRunner,
+    };
+    use crate::engine_support::UsageTracker;
 
     #[test]
     fn sanitize_api_keys_filters_empty_and_duplicate_values() {
@@ -490,5 +535,44 @@ mod tests {
         assert!(!is_openai_auth_failure(
             "OpenAI chat completions failed: 429 Too Many Requests",
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_openai_key_does_not_fall_back_to_local_smoke() {
+        let runner = TakosModelRunner::new_with_openai_api_keys(
+            "gpt-test",
+            None,
+            Vec::new(),
+            Vec::new(),
+            Arc::new(UsageTracker::default()),
+        );
+
+        let error = runner
+            .run(ModelInput {
+                session_id: SessionId::new(),
+                loop_id: LoopId::new(),
+                system_prompt: "system".to_string(),
+                session_context: Vec::new(),
+                memory_context: Vec::new(),
+                tool_context: Vec::new(),
+                user_message: "hello".to_string(),
+                plan: None,
+            })
+            .await
+            .expect_err("non-smoke model without keys must fail");
+
+        assert!(error
+            .to_string()
+            .contains("OpenAI API key is not configured"));
+    }
+
+    #[test]
+    fn provider_error_body_redacts_secret_like_tokens_and_truncates() {
+        let body = format!("bad key sk-secret {}", "x".repeat(700));
+        let sanitized = sanitize_provider_error_body(&body);
+
+        assert!(!sanitized.contains("sk-secret"));
+        assert!(sanitized.contains("<redacted>"));
+        assert!(sanitized.ends_with("..."));
     }
 }
