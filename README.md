@@ -79,7 +79,7 @@ contract で動きます。
 run が上限を超えた場合は `503 At capacity` を返します。
 
 agent-control RPC の canonical path は PaaS contract export
-`takos/paas/packages/paas-contract/src/agent-control.ts` の
+`takos/packages/paas-contract/src/agent-control.ts` の
 `/api/internal/v1/agent-control/*` です。`takos-agent` はこの path family を
 一次 surface として呼びます。executor-host / PaaS control plane 側は移行互換の
 ため `/rpc/control/*` alias も受け付けますが、新規実装では増やしません。
