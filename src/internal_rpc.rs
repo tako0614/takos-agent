@@ -347,7 +347,7 @@ mod tests {
             body: "{\"agentId\":\"agent_1\"}",
             actor: &actor,
             caller: "takos-agent",
-            audience: "takos-paas",
+            audience: "takosumi",
             capabilities: &["paas.agent.heartbeat"],
             request_id: None,
             nonce: "nonce_1",
@@ -364,7 +364,7 @@ mod tests {
             secret: "test-secret",
             headers: &signed.headers,
             expected_caller: Some(&["takos-agent"]),
-            expected_audience: Some("takos-paas"),
+            expected_audience: Some("takosumi"),
             required_capabilities: &["paas.agent.heartbeat"],
             now_ms: Some(1_777_593_630_000),
             max_clock_skew_ms: Some(i64::MAX),
@@ -374,7 +374,7 @@ mod tests {
 
         assert_eq!(verified.actor.actor_account_id, "acct_1");
         assert_eq!(verified.caller, "takos-agent");
-        assert_eq!(verified.audience, "takos-paas");
+        assert_eq!(verified.audience, "takosumi");
         assert_eq!(verified.capabilities, vec!["paas.agent.heartbeat"]);
     }
 
