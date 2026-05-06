@@ -355,6 +355,9 @@ pub fn resolve_embedding_backend_config(
 
 fn build_embedder(config: Option<EmbeddingBackendConfig>) -> AppResult<Arc<dyn Embedder>> {
     let Some(config) = config else {
+        warn!(
+            "embedding backend is not configured; falling back to Rust hash embedder for smoke/test use"
+        );
         return Ok(Arc::new(RustHashEmbedder::default()));
     };
 

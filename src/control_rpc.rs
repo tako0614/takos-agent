@@ -1068,13 +1068,13 @@ mod tests {
     }
 
     #[test]
-    fn control_rpc_client_keeps_paas_internal_url_separate_from_legacy_rpc() {
+    fn control_rpc_client_keeps_takosumi_internal_url_separate_from_legacy_rpc() {
         let _guard = CONTROL_RPC_ENV_LOCK
             .lock()
             .expect("env lock should not be poisoned");
         let saved = saved_control_rpc_env();
         clear_control_rpc_env();
-        env::set_var("TAKOS_PAAS_INTERNAL_URL", "https://paas.internal");
+        env::set_var("TAKOSUMI_INTERNAL_URL", "https://takosumi.internal");
 
         let client = ControlRpcClient::new(&StartPayload {
             run_id: "run-test".to_string(),
@@ -1116,7 +1116,7 @@ mod tests {
             "TAKOS_LEGACY_CONTROL_RPC_TOKEN",
             "CONTROL_RPC_TOKEN",
             "TAKOS_CONTROL_RPC_TOKEN",
-            "TAKOS_PAAS_INTERNAL_URL",
+            "TAKOSUMI_INTERNAL_URL",
         ]
         .into_iter()
         .map(|key| (key, env::var(key).ok()))
@@ -1133,7 +1133,7 @@ mod tests {
             "TAKOS_LEGACY_CONTROL_RPC_TOKEN",
             "CONTROL_RPC_TOKEN",
             "TAKOS_CONTROL_RPC_TOKEN",
-            "TAKOS_PAAS_INTERNAL_URL",
+            "TAKOSUMI_INTERNAL_URL",
         ] {
             env::remove_var(key);
         }
