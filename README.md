@@ -2,7 +2,7 @@
 
 `takos-agent` は Takos の agent execution service です。`takos-agent-engine` を
 Rust library として利用し、agent loop、managed skills の Rust runtime copy、
-prompt construction、tool bridge を service process 内で扱います。PaaS-owned
+prompt construction、tool bridge を service process 内で扱います。Takosumi-owned
 agent-control RPC と接続します。
 
 このディレクトリの正本責務は次です。
@@ -13,7 +13,7 @@ agent-control RPC と接続します。
 - skill catalog 合成と selection
 - skill prompt / system prompt 構築
 - model runner wiring
-- PaaS control plane との agent-control RPC client
+- Takosumi control plane との agent-control RPC client
 - remote tool 実行の bridge
 
 ## 境界
@@ -30,7 +30,7 @@ Rust container が正本として持つもの:
 - prompt construction
 - model runner wiring
 
-PaaS / control plane 側に残すもの:
+Takosumi / control plane 側に残すもの:
 
 - run queue と run lifecycle 管理
 - DB / billing / auth / space state
@@ -39,12 +39,12 @@ PaaS / control plane 側に残すもの:
 - agent container を起動する executor pool host process
 
 この分離により、agent の思考と実行本体は Rust で固定しつつ、Takos platform の
-stateful backend と tool backend は PaaS / control plane 側で運用できます。
+stateful backend と tool backend は Takosumi / control plane 側で運用できます。
 
 ## 主要モジュール
 
 - `src/main.rs`
-  - `/start` entrypoint。PaaS-owned agent-control RPC から bootstrap して agent loop を起動
+  - `/start` entrypoint。Takosumi-owned agent-control RPC から bootstrap して agent loop を起動
 - `src/engine_support.rs`
   - agent engine support wiring
 - `src/skills.rs`
@@ -56,7 +56,7 @@ stateful backend と tool backend は PaaS / control plane 側で運用できま
 - `src/tool_bridge.rs`
   - local memory/skill tools と remote tool catalog の合成
 - `src/control_rpc.rs`
-  - PaaS-owned agent-control RPC contract client
+  - Takosumi-owned agent-control RPC contract client
 
 ## Contract
 
@@ -78,10 +78,10 @@ contract で動きます。
 を注入します。同じ `runId` の duplicate `/start` は accepted として扱い、別の
 run が上限を超えた場合は `503 At capacity` を返します。
 
-agent-control RPC の canonical path は PaaS contract export
-`takos/packages/paas-contract/src/agent-control.ts` の
+agent-control RPC の canonical path は Takosumi contract export
+`takosumi-contract` の
 `/api/internal/v1/agent-control/*` です。`takos-agent` はこの path family を
-一次 surface として呼びます。executor-host / PaaS control plane 側は移行互換の
+一次 surface として呼びます。executor-host / Takosumi control plane 側は移行互換の
 ため `/rpc/control/*` alias も受け付けますが、新規実装では増やしません。
 
 - `TAKOS_AGENT_CONTROL_RPC_BASE_URL` / `TAKOS_AGENT_CONTROL_RPC_TOKEN`
@@ -94,11 +94,11 @@ agent-control RPC の canonical path は PaaS contract export
   - 旧互換 alias。新規設定では使わない
 - `/start` payload の `controlRpcBaseUrl` / `controlRpcToken`
   - executor pool host から渡される fallback
-- `TAKOS_PAAS_INTERNAL_URL`
-  - tenant/platform PaaS internal API 用。agent-control RPC の bearer-token transport
+- `TAKOSUMI_INTERNAL_URL`
+  - tenant/platform Takosumi internal API 用。agent-control RPC の bearer-token transport
     base としては使わない
 
-PaaS 側の contract export では、run bootstrap / context / config / tool catalog /
+Takosumi 側の contract export では、run bootstrap / context / config / tool catalog /
 tool execute / heartbeat / status update / run event などの surface を明示します。
 
 `/api/internal/v1/agent-control/run-config` の budget は `maxGraphSteps` / `maxToolRounds`
@@ -115,6 +115,15 @@ memory embedding backend は未設定時に smoke/test 用の Rust hash embedder
 `TAKOS_EMBEDDING_DIMENSIONS` を優先します。API key は control plane の
 `/api/internal/v1/agent-control/api-keys` の OpenAI key、最後に `OPENAI_API_KEY` も fallback
 として使います。
+
+Production では `TAKOS_EMBEDDING_PROVIDER=openai-compatible` または `openai` と、
+`TAKOS_EMBEDDING_API_KEY` / `OPENAI_EMBEDDING_API_KEY` / control plane の
+OpenAI key のいずれかを設定します。`TAKOS_EMBEDDING_MODEL` は未指定時
+`text-embedding-3-small`、`TAKOS_EMBEDDING_BASE_URL` は OpenAI-compatible endpoint
+を差し替える場合のみ、`TAKOS_EMBEDDING_DIMENSIONS` は provider が dimension 指定を
+受ける場合のみ設定します。embedding provider が全く設定されていない場合、service は
+WARN を出して Rust hash embedder に fallback します。これは smoke/test 用であり
+production memory retrieval の backend として扱いません。
 
 ## Repository layout
 

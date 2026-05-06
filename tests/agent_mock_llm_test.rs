@@ -35,11 +35,16 @@ use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{json, Value};
-use takos_agent::control_rpc::ToolDefinition;
-use takos_agent::engine_support::UsageTracker;
+use takos_agent::control_rpc::{
+    ControlRpcClient, RunConfigResponse, SkillCatalogResponse, StartPayload, ToolDefinition,
+};
+use takos_agent::engine_support::{
+    build_engine_deps, resolve_embedding_backend_config, UsageTracker,
+};
 use takos_agent::model::TakosModelRunner;
+use takos_agent::tool_bridge::CompositeToolExecutor;
 use takos_agent_engine::ids::{LoopId, SessionId};
-use takos_agent_engine::model::{ModelInput, ModelRunner};
+use takos_agent_engine::model::{Embedding, ModelInput, ModelRunner};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -76,6 +81,7 @@ impl MockOpenAiServer {
         };
         let app = Router::new()
             .route("/v1/chat/completions", post(handle_chat_completions))
+            .route("/embeddings", post(handle_embeddings))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -94,6 +100,10 @@ impl MockOpenAiServer {
 
     fn endpoint(&self) -> String {
         format!("http://{}/v1/chat/completions", self.addr)
+    }
+
+    fn embedding_base_url(&self) -> String {
+        format!("http://{}", self.addr)
     }
 
     async fn set_response(&self, response: Value) {
@@ -116,6 +126,22 @@ async fn handle_chat_completions(
     headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> Json<Value> {
+    capture_mock_request(&state, headers, body).await;
+    let response = state.response.lock().await.clone();
+    Json(response)
+}
+
+async fn handle_embeddings(
+    State(state): State<MockState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    capture_mock_request(&state, headers, body).await;
+    let response = state.response.lock().await.clone();
+    Json(response)
+}
+
+async fn capture_mock_request(state: &MockState, headers: axum::http::HeaderMap, body: Value) {
     let auth_header = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -125,8 +151,6 @@ async fn handle_chat_completions(
         .lock()
         .await
         .push(CapturedRequest { body, auth_header });
-    let response = state.response.lock().await.clone();
-    Json(response)
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +239,20 @@ fn assistant_message_response(text: &str) -> Value {
             "completion_tokens": 9,
             "total_tokens": 32
         }
+    })
+}
+
+fn embedding_response() -> Value {
+    json!({
+        "object": "list",
+        "data": [
+            {
+                "object": "embedding",
+                "index": 0,
+                "embedding": [0.125, 0.875]
+            }
+        ],
+        "model": "embedding-mock"
     })
 }
 
@@ -407,4 +445,85 @@ async fn mock_llm_assistant_message_only_response_decodes_to_engine_output() {
         output.tool_calls.is_empty(),
         "no tool_calls expected for this fixture"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mock_openai_embedding_config_wires_engine_embedder() {
+    let server = MockOpenAiServer::start(embedding_response()).await;
+    let run_config = RunConfigResponse {
+        embedding_provider: Some("openai".to_string()),
+        embedding_model: Some("embedding-mock".to_string()),
+        embedding_base_url: Some(server.embedding_base_url()),
+        embedding_dimensions: Some(2),
+        ..Default::default()
+    };
+    let embedding_config =
+        resolve_embedding_backend_config(&run_config, Some("sk-embedding-control"))
+            .expect("embedding config should resolve")
+            .expect("OpenAI-compatible embedding config should be enabled");
+    let usage = Arc::new(UsageTracker::default());
+    let model_runner = TakosModelRunner::new_with_endpoint(
+        server.endpoint(),
+        "local-smoke",
+        None,
+        vec!["sk-chat-unused".to_string()],
+        Vec::new(),
+        usage,
+    );
+    let client = ControlRpcClient::new(&StartPayload {
+        run_id: "run-embedding-test".to_string(),
+        worker_id: "worker-embedding-test".to_string(),
+        service_id: None,
+        model: Some("local-smoke".to_string()),
+        lease_version: None,
+        executor_tier: None,
+        executor_container_id: None,
+        control_rpc_base_url: "http://127.0.0.1:1".to_string(),
+        control_rpc_token: "control-token".to_string(),
+    })
+    .expect("control RPC client should build for test wiring");
+    let tool_executor =
+        CompositeToolExecutor::new(client, Vec::new(), SkillCatalogResponse::default());
+    let root = unique_temp_dir("takos-agent-embedding");
+    std::fs::create_dir_all(&root).expect("test engine root should be created");
+    let deps = build_engine_deps(&root, model_runner, tool_executor, Some(embedding_config))
+        .expect("engine deps should build with OpenAI-compatible embedder");
+
+    let embedding = deps
+        .embedder
+        .embed_text("remember agent memory")
+        .await
+        .expect("embedding request should succeed");
+    assert_eq!(embedding, Embedding(vec![0.125, 0.875]));
+
+    let captured = server.captured_requests().await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "embedding request should hit mock server"
+    );
+    let request = &captured[0];
+    assert_eq!(
+        request.auth_header.as_deref(),
+        Some("Bearer sk-embedding-control"),
+        "control-plane OpenAI key should be used for embeddings",
+    );
+    assert_eq!(
+        request.body,
+        json!({
+            "model": "embedding-mock",
+            "input": "remember agent memory",
+            "dimensions": 2
+        }),
+    );
+
+    std::fs::remove_dir_all(root).expect("test engine root should be removed");
+}
+
+fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{nanos}"))
 }
