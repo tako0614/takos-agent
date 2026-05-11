@@ -58,6 +58,10 @@ pub struct RunBootstrap {
     pub status: Option<String>,
     #[serde(alias = "spaceId")]
     pub space_id: String,
+    #[serde(default, alias = "installationId")]
+    pub installation_id: Option<String>,
+    #[serde(default, alias = "runtimeNamespace")]
+    pub runtime_namespace: Option<String>,
     #[serde(alias = "sessionId")]
     pub session_id: Option<String>,
     #[serde(alias = "threadId")]
@@ -775,7 +779,7 @@ fn activated_skill_array_field(payload: &Value, keys: &[&str]) -> Vec<ActivatedS
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_control_rpc_config, ControlRpcClient, StartPayload};
+    use super::{resolve_control_rpc_config, ControlRpcClient, RunBootstrap, StartPayload};
     use serde_json::json;
     use std::env;
     use std::io::{Read, Write};
@@ -784,6 +788,28 @@ mod tests {
     use std::thread;
 
     static CONTROL_RPC_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn run_bootstrap_accepts_app_installation_context() {
+        let bootstrap: RunBootstrap = serde_json::from_value(json!({
+            "status": "running",
+            "spaceId": "space_1",
+            "installationId": "inst_1",
+            "runtimeNamespace": "shared-cell://tokyo-cell-01/namespaces/inst_1",
+            "sessionId": "session_1",
+            "threadId": "thread_1",
+            "userId": "user_1",
+            "agentType": "default"
+        }))
+        .expect("bootstrap should decode");
+
+        assert_eq!(bootstrap.space_id, "space_1");
+        assert_eq!(bootstrap.installation_id.as_deref(), Some("inst_1"));
+        assert_eq!(
+            bootstrap.runtime_namespace.as_deref(),
+            Some("shared-cell://tokyo-cell-01/namespaces/inst_1")
+        );
+    }
 
     #[tokio::test]
     async fn control_rpc_client_sends_executor_pool_headers() {

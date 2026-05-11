@@ -30,7 +30,7 @@ use tracing::{error, info, warn};
 use crate::control_rpc::{is_lease_lost, ControlRpcClient, StartPayload, UsagePayload};
 use crate::engine_support::{
     build_engine_config, build_engine_deps, build_session_request, derive_engine_session_id,
-    last_user_message, resolve_embedding_backend_config, safe_space_path,
+    last_user_message, resolve_embedding_backend_config, safe_run_store_path,
 };
 use crate::model::TakosModelRunner;
 use crate::skills::build_skill_catalog;
@@ -372,7 +372,11 @@ async fn execute_run(payload: StartPayload, state: Arc<ServiceState>) -> AppResu
     );
     let engine_session_id =
         derive_engine_session_id(bootstrap.session_id.as_deref(), &bootstrap.thread_id);
-    let store_root = safe_space_path(&state.data_dir, &bootstrap.space_id);
+    let store_root = safe_run_store_path(
+        &state.data_dir,
+        &bootstrap.space_id,
+        bootstrap.installation_id.as_deref(),
+    );
     std::fs::create_dir_all(&store_root)?;
 
     let api_keys = client.api_keys().await.unwrap_or_default();
@@ -416,6 +420,8 @@ async fn execute_run(payload: StartPayload, state: Arc<ServiceState>) -> AppResu
                 "message": "Rust agent execution started",
                 "agent_type": bootstrap.agent_type,
                 "space_id": bootstrap.space_id,
+                "installation_id": bootstrap.installation_id,
+                "runtime_namespace": bootstrap.runtime_namespace,
                 "thread_id": bootstrap.thread_id,
                 "manual_count": manual_count,
                 "remote_tool_count": tool_catalog.tools.len(),
