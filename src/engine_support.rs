@@ -425,8 +425,8 @@ pub fn build_session_request(
     }
 }
 
-pub fn safe_space_path(root: &Path, space_id: &str) -> std::path::PathBuf {
-    let mut slug = space_id
+fn safe_storage_slug(value: &str) -> String {
+    let mut slug = value
         .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
@@ -439,7 +439,32 @@ pub fn safe_space_path(root: &Path, space_id: &str) -> std::path::PathBuf {
     if slug.is_empty() || slug == "." || slug == ".." {
         slug = "_".to_string();
     }
-    root.join("spaces").join(slug)
+    slug
+}
+
+pub fn safe_space_path(root: &Path, space_id: &str) -> std::path::PathBuf {
+    root.join("spaces").join(safe_storage_slug(space_id))
+}
+
+pub fn safe_installation_path(
+    root: &Path,
+    space_id: &str,
+    installation_id: &str,
+) -> std::path::PathBuf {
+    safe_space_path(root, space_id)
+        .join("installations")
+        .join(safe_storage_slug(installation_id))
+}
+
+pub fn safe_run_store_path(
+    root: &Path,
+    space_id: &str,
+    installation_id: Option<&str>,
+) -> std::path::PathBuf {
+    if let Some(installation_id) = installation_id.filter(|value| !value.trim().is_empty()) {
+        return safe_installation_path(root, space_id, installation_id);
+    }
+    safe_space_path(root, space_id)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -540,11 +565,12 @@ fn truncate_title(source: &str) -> String {
 mod tests {
     use super::{
         build_embedder, build_engine_config, resolve_embedding_backend_config_from_values,
-        EmbeddingBackendConfig, EnvEmbeddingConfig,
+        safe_run_store_path, EmbeddingBackendConfig, EnvEmbeddingConfig,
     };
     use crate::control_rpc::RunConfigResponse;
     use crate::prompts::system_prompt_for_agent_type;
     use serde_json::json;
+    use std::path::{Path, PathBuf};
     use takos_agent_engine::model::Embedding;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -592,6 +618,30 @@ mod tests {
 
         assert_eq!(config.runtime.max_graph_steps, 7);
         assert_eq!(config.runtime.max_tool_rounds, 3);
+    }
+
+    #[test]
+    fn run_store_path_uses_installation_namespace_when_present() {
+        let root = PathBuf::from("/tmp/takos-agent-test");
+
+        assert_eq!(
+            safe_run_store_path(&root, "space_1", Some("inst_1"))
+                .strip_prefix(&root)
+                .unwrap(),
+            Path::new("spaces/space_1/installations/inst_1"),
+        );
+        assert_eq!(
+            safe_run_store_path(&root, "space_1", Some("../inst"))
+                .strip_prefix(&root)
+                .unwrap(),
+            Path::new("spaces/space_1/installations/.._inst"),
+        );
+        assert_eq!(
+            safe_run_store_path(&root, "space_1", Some(""))
+                .strip_prefix(&root)
+                .unwrap(),
+            Path::new("spaces/space_1"),
+        );
     }
 
     #[test]
