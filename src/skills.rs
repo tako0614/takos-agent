@@ -58,17 +58,17 @@ pub fn build_skill_catalog(
         .unwrap_or_else(|| resolve_skill_locale(&runtime_context.resolution_context));
     let available_tools = available_tool_names
         .iter()
-        .map(|tool| tool.as_str())
+        .map(std::string::String::as_str)
         .collect::<HashSet<_>>();
     let available_mcp_servers = runtime_context
         .available_mcp_server_names
         .iter()
-        .map(|name| name.as_str())
+        .map(std::string::String::as_str)
         .collect::<HashSet<_>>();
     let available_template_ids = runtime_context
         .available_template_ids
         .iter()
-        .map(|id| id.as_str())
+        .map(std::string::String::as_str)
         .collect::<HashSet<_>>();
 
     let control_skills_include_managed = runtime_context
@@ -690,7 +690,7 @@ fn string_array_field(source: &serde_json::Map<String, Value>, key: &str) -> Vec
 fn tokenize(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
-    for ch in text.chars().flat_map(|ch| ch.to_lowercase()) {
+    for ch in text.chars().flat_map(char::to_lowercase) {
         if ch.is_alphanumeric() || is_japanese(ch) {
             current.push(ch);
         } else if current.chars().count() >= 2 {

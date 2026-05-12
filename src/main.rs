@@ -146,9 +146,7 @@ async fn main() -> AppResult<()> {
     init_tracing();
 
     let data_dir = env::var("TAKOS_AGENT_DATA_DIR")
-        .or_else(|_| env::var("TAKOS_RUST_AGENT_DATA_DIR"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/var/lib/takos/agent"));
+        .or_else(|_| env::var("TAKOS_RUST_AGENT_DATA_DIR")).map_or_else(|_| PathBuf::from("/var/lib/takos/agent"), PathBuf::from);
     std::fs::create_dir_all(&data_dir)?;
 
     let max_concurrent_runs = parse_max_concurrent_runs(env::var("MAX_CONCURRENT_RUNS").ok());
@@ -514,8 +512,8 @@ async fn heartbeat_loop(
 ) {
     loop {
         tokio::select! {
-            _ = cancellation_token.cancelled() => break,
-            _ = sleep(interval) => {
+            () = cancellation_token.cancelled() => break,
+            () = sleep(interval) => {
                 if let Err(err) = client.heartbeat().await {
                     if is_lease_lost(err.as_ref()) {
                         warn!(run_id = client.run_id(), error = %err, "executor lease lost; cancelling run");
@@ -825,7 +823,7 @@ mod tests {
     #[test]
     fn parse_max_concurrent_runs_defaults_to_five() {
         assert_eq!(parse_max_concurrent_runs(None), 5);
-        assert_eq!(parse_max_concurrent_runs(Some("".to_string())), 5);
+        assert_eq!(parse_max_concurrent_runs(Some(String::new())), 5);
         assert_eq!(parse_max_concurrent_runs(Some("0".to_string())), 5);
         assert_eq!(parse_max_concurrent_runs(Some("invalid".to_string())), 5);
     }

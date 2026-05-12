@@ -11,7 +11,7 @@ use crate::control_rpc::{ToolDefinition, UsagePayload};
 use crate::engine_support::UsageTracker;
 use crate::AppResult;
 
-/// Default OpenAI Chat Completions endpoint. Centralised so the `mock-llm`
+/// Default `OpenAI` Chat Completions endpoint. Centralised so the `mock-llm`
 /// feature can override it without editing the production code path.
 const DEFAULT_OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
 
@@ -63,8 +63,8 @@ impl TakosModelRunner {
     }
 
     /// Phase 20E test-only constructor: route Chat Completions calls at a
-    /// caller-supplied endpoint (e.g. a local mock OpenAI stub) instead of
-    /// the public OpenAI API. The flag is gated on the `mock-llm` Cargo
+    /// caller-supplied endpoint (e.g. a local mock `OpenAI` stub) instead of
+    /// the public `OpenAI` API. The flag is gated on the `mock-llm` Cargo
     /// feature so production builds never expose the alternate path.
     #[cfg(any(test, feature = "mock-llm"))]
     #[allow(dead_code)]
@@ -518,7 +518,7 @@ mod tests {
     fn sanitize_api_keys_filters_empty_and_duplicate_values() {
         let keys = sanitize_api_keys(vec![
             " sk-one ".to_string(),
-            "".to_string(),
+            String::new(),
             "sk-one".to_string(),
             "sk-two".to_string(),
         ]);

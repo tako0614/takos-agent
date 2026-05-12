@@ -1,13 +1,13 @@
 //! Phase 20E — takos-agent mock LLM e2e integration test.
 //!
-//! Spins up a local axum HTTP server stubbing the OpenAI Chat Completions
+//! Spins up a local axum HTTP server stubbing the `OpenAI` Chat Completions
 //! endpoint, points `TakosModelRunner` at it via the `mock-llm`-gated
 //! `new_with_endpoint` constructor, and asserts:
 //!
 //!   1. A canned `tool_calls` response is decoded into the engine
 //!      `ModelOutput.tool_calls` shape so the agent's tool-execution loop can
 //!      schedule the call (the canonical e2e flow: thread -> mock LLM ->
-//!      tool_call response -> tool_bridge dispatch -> conversation update).
+//!      `tool_call` response -> `tool_bridge` dispatch -> conversation update).
 //!   2. A canned assistant `content` response is surfaced as
 //!      `ModelOutput.assistant_message` so the run loop terminates with a
 //!      user-visible reply.
@@ -17,7 +17,7 @@
 //!      name is `local-smoke`: the mock server is never called and the
 //!      built-in directives (`memory:` / `tool:`) intercept the prompt before
 //!      any HTTP request fires. This is the same precedence that guards
-//!      skill_resolution / memory tool short-circuits in production.
+//!      `skill_resolution` / memory tool short-circuits in production.
 //!
 //! Run with:
 //!   cd takos/agent
