@@ -146,7 +146,8 @@ async fn main() -> AppResult<()> {
     init_tracing();
 
     let data_dir = env::var("TAKOS_AGENT_DATA_DIR")
-        .or_else(|_| env::var("TAKOS_RUST_AGENT_DATA_DIR")).map_or_else(|_| PathBuf::from("/var/lib/takos/agent"), PathBuf::from);
+        .or_else(|_| env::var("TAKOS_RUST_AGENT_DATA_DIR"))
+        .map_or_else(|_| PathBuf::from("/var/lib/takos/agent"), PathBuf::from);
     std::fs::create_dir_all(&data_dir)?;
 
     let max_concurrent_runs = parse_max_concurrent_runs(env::var("MAX_CONCURRENT_RUNS").ok());
@@ -222,9 +223,9 @@ async fn start(
         }
     }
 
-    let payload_for_task = payload.clone();
+    let payload_for_task = payload;
     let run_id_for_task = run_id.clone();
-    let state_for_task = state.clone();
+    let state_for_task = state;
     tokio::spawn(async move {
         if let Err(err) = execute_run(payload_for_task.clone(), state_for_task.clone()).await {
             error!(error = %err, "run execution failed");
@@ -766,7 +767,7 @@ fn push_tool(
     true
 }
 
-fn run_status_for_loop(status: LoopStatus) -> &'static str {
+const fn run_status_for_loop(status: LoopStatus) -> &'static str {
     match status {
         LoopStatus::Finished => "completed",
         LoopStatus::Cancelled => "cancelled",
