@@ -1130,7 +1130,6 @@ mod tests {
                 "create_repository",
                 "container_start",
                 "container_commit",
-                "group_deployment_snapshot_deploy_from_repo",
             ]),
         );
 
@@ -1235,7 +1234,6 @@ mod tests {
                 "container_start",
                 "runtime_exec",
                 "container_commit",
-                "group_deployment_snapshot_deploy_from_repo",
                 "create_artifact",
             ]),
         );
