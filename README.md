@@ -38,8 +38,8 @@ Takosumi / control plane 側に残すもの:
 - custom skill の CRUD と永続化
 - agent container を起動する executor pool host process
 
-この分離により、agent の思考と実行本体は Rust で固定しつつ、Takos platform の
-stateful backend と tool backend は Takosumi / control plane 側で運用できます。
+この分離により、agent の思考と実行本体は Rust で固定しつつ、Takos product の
+stateful backend と tool backend は Takos app / Takosumi kernel control plane 側で運用できます。
 
 ## 主要モジュール
 
