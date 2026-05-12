@@ -845,9 +845,7 @@ mod tests {
                         expected_len = Some(header_end + 4 + content_len);
                     }
                 }
-                if expected_len
-                    .is_some_and(|length| request.len() >= length)
-                {
+                if expected_len.is_some_and(|length| request.len() >= length) {
                     break;
                 }
             }
@@ -920,9 +918,7 @@ mod tests {
                         expected_len = Some(header_end + 4 + content_len);
                     }
                 }
-                if expected_len
-                    .is_some_and(|length| request.len() >= length)
-                {
+                if expected_len.is_some_and(|length| request.len() >= length) {
                     break;
                 }
             }
@@ -1015,9 +1011,7 @@ mod tests {
                         expected_len = Some(header_end + 4 + content_len);
                     }
                 }
-                if expected_len
-                    .is_some_and(|length| request.len() >= length)
-                {
+                if expected_len.is_some_and(|length| request.len() >= length) {
                     break;
                 }
             }

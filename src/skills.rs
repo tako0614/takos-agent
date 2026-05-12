@@ -1171,7 +1171,7 @@ mod tests {
         control_managed.name = "Control Managed Research".to_string();
 
         let context =
-            runtime_context_with_control_skills(Some("en"), vec![control_managed.clone()], vec![]);
+            runtime_context_with_control_skills(Some("en"), vec![control_managed], vec![]);
         let catalog = build_skill_catalog(&context, &tool_names(&["search", "web_fetch"]));
 
         let skill = catalog

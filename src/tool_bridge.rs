@@ -222,7 +222,7 @@ fn lock_tool_executions(
 
 fn rpc_tool_result_to_engine(name: &str, rpc: RpcToolResult) -> ToolCallResult {
     let output = rpc.output.clone();
-    let error = rpc.error.clone();
+    let error = rpc.error;
     let content = if let Some(error) = error.clone() {
         json!({
             "output": output,

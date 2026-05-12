@@ -131,12 +131,20 @@ impl Distiller for RustSimpleDistiller {
         let user_request = input
             .raw_nodes
             .iter()
-            .find(|node| node.kind == RawNodeKind::UserUtterance).map_or_else(|| "Untitled session".to_string(), takos_agent_engine::domain::RawNode::content_text);
+            .find(|node| node.kind == RawNodeKind::UserUtterance)
+            .map_or_else(
+                || "Untitled session".to_string(),
+                takos_agent_engine::domain::RawNode::content_text,
+            );
 
         let assistant_summary = input
             .raw_nodes
             .iter()
-            .find(|node| node.kind == RawNodeKind::AssistantUtterance).map_or_else(|| "No assistant output yet.".to_string(), takos_agent_engine::domain::RawNode::content_text);
+            .find(|node| node.kind == RawNodeKind::AssistantUtterance)
+            .map_or_else(
+                || "No assistant output yet.".to_string(),
+                takos_agent_engine::domain::RawNode::content_text,
+            );
 
         let mut entities = vec![
             EntityRef {
