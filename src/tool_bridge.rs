@@ -96,7 +96,7 @@ impl ToolExecutor for CompositeToolExecutor {
             emit_tool_call_event(&self.client, &tool_call_id, &tool_name, &tool_arguments)
                 .await
                 .ok();
-            emit_thinking_event(&self.client, format!("Running tool {}", tool_name))
+            emit_thinking_event(&self.client, format!("Running tool {tool_name}"))
                 .await
                 .ok();
             let output = execute_local_skill_tool(
@@ -105,7 +105,7 @@ impl ToolExecutor for CompositeToolExecutor {
                 self.local_skill_catalog.as_ref(),
             )
             .ok_or_else(|| {
-                EngineError::Tool(format!("unsupported local skill tool {}", tool_name))
+                EngineError::Tool(format!("unsupported local skill tool {tool_name}"))
             })?;
             let summary = format!("{} output={}", tool_name, truncate_summary(&output));
             self.client
@@ -124,7 +124,7 @@ impl ToolExecutor for CompositeToolExecutor {
                 output: output.clone(),
                 error: None,
             });
-            emit_thinking_event(&self.client, format!("Tool {} finished", tool_name))
+            emit_thinking_event(&self.client, format!("Tool {tool_name} finished"))
                 .await
                 .ok();
             return Ok(ToolCallResult {
@@ -141,7 +141,7 @@ impl ToolExecutor for CompositeToolExecutor {
             )
             .await
             .ok();
-        emit_thinking_event(&self.client, format!("Running tool {}", tool_name))
+        emit_thinking_event(&self.client, format!("Running tool {tool_name}"))
             .await
             .ok();
 
@@ -153,7 +153,7 @@ impl ToolExecutor for CompositeToolExecutor {
             Ok(result) => result,
             Err(err) => {
                 let error = err.to_string();
-                let summary = format!("{} error={}", tool_name, error);
+                let summary = format!("{tool_name} error={error}");
                 self.client
                     .emit_run_event(
                         "tool_result",
@@ -161,7 +161,7 @@ impl ToolExecutor for CompositeToolExecutor {
                     )
                     .await
                     .ok();
-                emit_thinking_event(&self.client, format!("Tool {} finished", tool_name))
+                emit_thinking_event(&self.client, format!("Tool {tool_name} finished"))
                     .await
                     .ok();
                 return Err(EngineError::Tool(error));
@@ -261,12 +261,12 @@ fn stable_tool_call_id(sequence: u64, name: &str, arguments: &serde_json::Value)
 }
 
 fn hash_string(value: &str) -> String {
-    let mut hash: u64 = 0xcbf29ce484222325;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in value.as_bytes() {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("{:x}", hash)
+    format!("{hash:x}")
 }
 
 fn tool_call_event(

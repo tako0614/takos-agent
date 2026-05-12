@@ -287,12 +287,12 @@ impl ControlRpcClient {
     }
 
     fn idempotency_hash(value: &str) -> String {
-        let mut hash: u64 = 0xcbf29ce484222325;
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         for byte in value.as_bytes() {
-            hash ^= *byte as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
-        format!("{:x}", hash)
+        format!("{hash:x}")
     }
 
     pub async fn run_bootstrap(&self) -> AppResult<RunBootstrap> {
@@ -671,7 +671,7 @@ impl ControlRpcClient {
             let detail = if text.is_empty() {
                 status.to_string()
             } else {
-                format!("{} {}", status, text)
+                format!("{status} {text}")
             };
             return Err(io::Error::other(format!("{path} failed: {detail}")).into());
         }
@@ -846,8 +846,7 @@ mod tests {
                     }
                 }
                 if expected_len
-                    .map(|length| request.len() >= length)
-                    .unwrap_or(false)
+                    .is_some_and(|length| request.len() >= length)
                 {
                     break;
                 }
@@ -922,8 +921,7 @@ mod tests {
                     }
                 }
                 if expected_len
-                    .map(|length| request.len() >= length)
-                    .unwrap_or(false)
+                    .is_some_and(|length| request.len() >= length)
                 {
                     break;
                 }
@@ -1018,8 +1016,7 @@ mod tests {
                     }
                 }
                 if expected_len
-                    .map(|length| request.len() >= length)
-                    .unwrap_or(false)
+                    .is_some_and(|length| request.len() >= length)
                 {
                     break;
                 }
