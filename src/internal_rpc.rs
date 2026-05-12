@@ -118,37 +118,40 @@ pub fn verify_internal_rpc(
     input: InternalRpcVerifyInput<'_>,
 ) -> Result<Option<VerifiedInternalRpc>, String> {
     let version = read_header(input.headers, "x-takos-internal-version");
-    let signature = read_header(input.headers, "x-takos-internal-signature");
-    let timestamp = read_header(input.headers, "x-takos-internal-timestamp");
-    let request_id = read_header(input.headers, "x-takos-request-id");
-    let nonce = read_header(input.headers, "x-takos-nonce");
-    let caller = read_header(input.headers, "x-takos-caller");
-    let audience = read_header(input.headers, "x-takos-audience");
-    let body_digest = read_header(input.headers, "x-takos-body-digest");
-    let actor_context = read_header(input.headers, "x-takos-actor-context");
-    if version != Some(TAKOS_INTERNAL_RPC_VERSION)
-        || signature.is_none()
-        || timestamp.is_none()
-        || request_id.is_none()
-        || nonce.is_none()
-        || caller.is_none()
-        || audience.is_none()
-        || body_digest.is_none()
-        || actor_context.is_none()
-    {
+    if version != Some(TAKOS_INTERNAL_RPC_VERSION) {
         return Ok(None);
     }
-    let timestamp = timestamp.unwrap();
+    let (
+        Some(signature),
+        Some(timestamp),
+        Some(request_id),
+        Some(nonce),
+        Some(caller),
+        Some(audience),
+        Some(body_digest),
+        Some(actor_context),
+    ) = (
+        read_header(input.headers, "x-takos-internal-signature"),
+        read_header(input.headers, "x-takos-internal-timestamp"),
+        read_header(input.headers, "x-takos-request-id"),
+        read_header(input.headers, "x-takos-nonce"),
+        read_header(input.headers, "x-takos-caller"),
+        read_header(input.headers, "x-takos-audience"),
+        read_header(input.headers, "x-takos-body-digest"),
+        read_header(input.headers, "x-takos-actor-context"),
+    )
+    else {
+        return Ok(None);
+    };
+
     if !timestamp_within_skew(timestamp, input.now_ms, input.max_clock_skew_ms) {
         return Ok(None);
     }
-    let caller = caller.unwrap();
     if let Some(expected) = input.expected_caller {
         if !expected.contains(&caller) {
             return Ok(None);
         }
     }
-    let audience = audience.unwrap();
     if input
         .expected_audience
         .is_some_and(|expected| expected != audience)
@@ -162,13 +165,10 @@ pub fn verify_internal_rpc(
             return Ok(None);
         }
     }
-    let body_digest = body_digest.unwrap();
     if sha256_hex(input.body) != body_digest {
         return Ok(None);
     }
-    let actor_context = actor_context.unwrap();
     let actor = decode_actor_context(actor_context)?;
-    let request_id = request_id.unwrap();
     if actor.request_id != request_id {
         return Ok(None);
     }
@@ -178,7 +178,7 @@ pub fn verify_internal_rpc(
         query: input.query,
         timestamp,
         request_id,
-        nonce: nonce.unwrap(),
+        nonce,
         caller,
         audience,
         capabilities: &capabilities,
@@ -186,7 +186,7 @@ pub fn verify_internal_rpc(
         actor_context,
     });
     let expected_signature = hmac_sha256_hex(input.secret, &canonical)?;
-    if !constant_time_eq(&expected_signature, signature.unwrap()) {
+    if !constant_time_eq(&expected_signature, signature) {
         return Ok(None);
     }
     Ok(Some(VerifiedInternalRpc {
@@ -195,7 +195,7 @@ pub fn verify_internal_rpc(
         audience: audience.into(),
         capabilities,
         request_id: request_id.into(),
-        nonce: nonce.unwrap().into(),
+        nonce: nonce.into(),
         timestamp: timestamp.into(),
     }))
 }
