@@ -315,29 +315,7 @@ impl ControlRpcClient {
                 }),
             )
             .await?;
-        Ok(RunConfigResponse {
-            system_prompt: string_field(&payload, &["systemPrompt", "system_prompt"])
-                .unwrap_or_default(),
-            max_iterations: u32_field(&payload, &["maxIterations", "max_iterations"]),
-            max_graph_steps: u32_field(&payload, &["maxGraphSteps", "max_graph_steps"]),
-            max_tool_rounds: u32_field(&payload, &["maxToolRounds", "max_tool_rounds"]),
-            temperature: f32_field(&payload, &["temperature"]),
-            rate_limit: u32_field(&payload, &["rateLimit", "rate_limit"]),
-            embedding_provider: string_field(
-                &payload,
-                &["embeddingProvider", "embedding_provider"],
-            ),
-            embedding_model: string_field(&payload, &["embeddingModel", "embedding_model"]),
-            embedding_base_url: string_field(
-                &payload,
-                &["embeddingBaseUrl", "embeddingBaseURL", "embedding_base_url"],
-            ),
-            embedding_api_key: string_field(&payload, &["embeddingApiKey", "embedding_api_key"]),
-            embedding_dimensions: u32_field(
-                &payload,
-                &["embeddingDimensions", "embedding_dimensions"],
-            ),
-        })
+        Ok(parse_run_config_response(&payload))
     }
 
     pub async fn conversation_history(
@@ -674,6 +652,22 @@ impl ControlRpcClient {
     }
 }
 
+fn parse_run_config_response(payload: &Value) -> RunConfigResponse {
+    RunConfigResponse {
+        system_prompt: string_field(payload, &["systemPrompt"]).unwrap_or_default(),
+        max_iterations: u32_field(payload, &["maxIterations"]),
+        max_graph_steps: u32_field(payload, &["maxGraphSteps"]),
+        max_tool_rounds: u32_field(payload, &["maxToolRounds"]),
+        temperature: f32_field(payload, &["temperature"]),
+        rate_limit: u32_field(payload, &["rateLimit"]),
+        embedding_provider: string_field(payload, &["embeddingProvider"]),
+        embedding_model: string_field(payload, &["embeddingModel"]),
+        embedding_base_url: string_field(payload, &["embeddingBaseUrl"]),
+        embedding_api_key: string_field(payload, &["embeddingApiKey"]),
+        embedding_dimensions: u32_field(payload, &["embeddingDimensions"]),
+    }
+}
+
 fn resolve_control_rpc_config(
     payload: &StartPayload,
     env_base_url: Option<String>,
@@ -768,7 +762,10 @@ fn activated_skill_array_field(payload: &Value, keys: &[&str]) -> Vec<ActivatedS
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_control_rpc_config, ControlRpcClient, RunBootstrap, StartPayload};
+    use super::{
+        parse_run_config_response, resolve_control_rpc_config, ControlRpcClient, RunBootstrap,
+        StartPayload,
+    };
     use serde_json::json;
     use std::env;
     use std::io::{Read, Write};
@@ -798,6 +795,66 @@ mod tests {
             bootstrap.runtime_namespace.as_deref(),
             Some("shared-cell://tokyo-cell-01/namespaces/inst_1")
         );
+    }
+
+    #[test]
+    fn run_config_parser_uses_current_camel_case_fields_only() {
+        let config = parse_run_config_response(&json!({
+            "systemPrompt": "control prompt",
+            "maxIterations": 9,
+            "maxGraphSteps": 7,
+            "maxToolRounds": 3,
+            "rateLimit": 2,
+            "embeddingProvider": "openai",
+            "embeddingModel": "text-embedding-3-small",
+            "embeddingBaseUrl": "https://api.example/v1",
+            "embeddingApiKey": "secret",
+            "embeddingDimensions": 1536
+        }));
+
+        assert_eq!(config.system_prompt, "control prompt");
+        assert_eq!(config.max_iterations, Some(9));
+        assert_eq!(config.max_graph_steps, Some(7));
+        assert_eq!(config.max_tool_rounds, Some(3));
+        assert_eq!(config.rate_limit, Some(2));
+        assert_eq!(config.embedding_provider.as_deref(), Some("openai"));
+        assert_eq!(
+            config.embedding_model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+        assert_eq!(
+            config.embedding_base_url.as_deref(),
+            Some("https://api.example/v1")
+        );
+        assert_eq!(config.embedding_api_key.as_deref(), Some("secret"));
+        assert_eq!(config.embedding_dimensions, Some(1536));
+    }
+
+    #[test]
+    fn run_config_parser_ignores_snake_case_aliases() {
+        let config = parse_run_config_response(&json!({
+            "system_prompt": "old prompt",
+            "max_iterations": 9,
+            "max_graph_steps": 7,
+            "max_tool_rounds": 3,
+            "rate_limit": 2,
+            "embedding_provider": "openai",
+            "embedding_model": "text-embedding-3-small",
+            "embedding_base_url": "https://api.example/v1",
+            "embedding_api_key": "secret",
+            "embedding_dimensions": 1536
+        }));
+
+        assert_eq!(config.system_prompt, "");
+        assert_eq!(config.max_iterations, None);
+        assert_eq!(config.max_graph_steps, None);
+        assert_eq!(config.max_tool_rounds, None);
+        assert_eq!(config.rate_limit, None);
+        assert_eq!(config.embedding_provider, None);
+        assert_eq!(config.embedding_model, None);
+        assert_eq!(config.embedding_base_url, None);
+        assert_eq!(config.embedding_api_key, None);
+        assert_eq!(config.embedding_dimensions, None);
     }
 
     #[tokio::test]
