@@ -146,7 +146,6 @@ async fn main() -> AppResult<()> {
     init_tracing();
 
     let data_dir = env::var("TAKOS_AGENT_DATA_DIR")
-        .or_else(|_| env::var("TAKOS_RUST_AGENT_DATA_DIR"))
         .map_or_else(|_| PathBuf::from("/var/lib/takos/agent"), PathBuf::from);
     std::fs::create_dir_all(&data_dir)?;
 
