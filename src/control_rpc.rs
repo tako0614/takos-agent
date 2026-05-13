@@ -8,18 +8,8 @@ use serde_json::{json, Value};
 
 use crate::AppResult;
 
-const CONTROL_RPC_BASE_URL_ENV_KEYS: &[&str] = &[
-    "TAKOS_AGENT_CONTROL_RPC_BASE_URL",
-    "TAKOS_LEGACY_CONTROL_RPC_BASE_URL",
-    "CONTROL_RPC_BASE_URL",
-    "TAKOS_CONTROL_RPC_BASE_URL",
-];
-const CONTROL_RPC_TOKEN_ENV_KEYS: &[&str] = &[
-    "TAKOS_AGENT_CONTROL_RPC_TOKEN",
-    "TAKOS_LEGACY_CONTROL_RPC_TOKEN",
-    "CONTROL_RPC_TOKEN",
-    "TAKOS_CONTROL_RPC_TOKEN",
-];
+const CONTROL_RPC_BASE_URL_ENV_KEY: &str = "TAKOS_AGENT_CONTROL_RPC_BASE_URL";
+const CONTROL_RPC_TOKEN_ENV_KEY: &str = "TAKOS_AGENT_CONTROL_RPC_TOKEN";
 const AGENT_CONTROL_RPC_PATH_PREFIX: &str = "/api/internal/v1/agent-control";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -262,8 +252,8 @@ impl ControlRpcClient {
             .build()?;
         let (base_url, token) = resolve_control_rpc_config(
             payload,
-            first_nonempty_env(CONTROL_RPC_BASE_URL_ENV_KEYS),
-            first_nonempty_env(CONTROL_RPC_TOKEN_ENV_KEYS),
+            nonempty_env(CONTROL_RPC_BASE_URL_ENV_KEY),
+            nonempty_env(CONTROL_RPC_TOKEN_ENV_KEY),
         )?;
         Ok(Self {
             http,
@@ -709,9 +699,8 @@ fn resolve_control_rpc_config(
     Ok((base_url, token))
 }
 
-fn first_nonempty_env(keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| env::var(key).ok().filter(|value| !value.trim().is_empty()))
+fn nonempty_env(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|value| !value.trim().is_empty())
 }
 
 pub fn is_lease_lost(error: &(dyn std::error::Error + 'static)) -> bool {
@@ -1085,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn control_rpc_client_keeps_takosumi_internal_url_separate_from_legacy_rpc() {
+    fn control_rpc_client_keeps_takosumi_internal_url_separate_from_agent_rpc() {
         let _guard = CONTROL_RPC_ENV_LOCK
             .lock()
             .expect("env lock should not be poisoned");
@@ -1101,13 +1090,51 @@ mod tests {
             lease_version: None,
             executor_tier: None,
             executor_container_id: None,
-            control_rpc_base_url: "https://legacy-control.example/".to_string(),
+            control_rpc_base_url: "https://agent-control.example/".to_string(),
             control_rpc_token: "payload-token".to_string(),
         })
         .expect("control RPC client should build");
 
         restore_control_rpc_env(saved);
-        assert_eq!(client.base_url, "https://legacy-control.example");
+        assert_eq!(client.base_url, "https://agent-control.example");
+    }
+
+    #[test]
+    fn control_rpc_client_ignores_retired_env_aliases() {
+        let _guard = CONTROL_RPC_ENV_LOCK
+            .lock()
+            .expect("env lock should not be poisoned");
+        let saved = saved_control_rpc_env();
+        clear_control_rpc_env();
+        env::set_var(
+            "TAKOS_LEGACY_CONTROL_RPC_BASE_URL",
+            "https://retired-agent.example/",
+        );
+        env::set_var("TAKOS_LEGACY_CONTROL_RPC_TOKEN", "retired-token");
+        env::set_var("CONTROL_RPC_BASE_URL", "https://control-rpc.example/");
+        env::set_var("CONTROL_RPC_TOKEN", "control-token");
+        env::set_var(
+            "TAKOS_CONTROL_RPC_BASE_URL",
+            "https://takos-control.example/",
+        );
+        env::set_var("TAKOS_CONTROL_RPC_TOKEN", "takos-control-token");
+
+        let client = ControlRpcClient::new(&StartPayload {
+            run_id: "run-test".to_string(),
+            worker_id: "worker-test".to_string(),
+            service_id: Some("service-test".to_string()),
+            model: Some("local-smoke".to_string()),
+            lease_version: None,
+            executor_tier: None,
+            executor_container_id: None,
+            control_rpc_base_url: "https://payload-agent-control.example/".to_string(),
+            control_rpc_token: "payload-token".to_string(),
+        })
+        .expect("control RPC client should build");
+
+        restore_control_rpc_env(saved);
+        assert_eq!(client.base_url, "https://payload-agent-control.example");
+        assert_eq!(client.token, "payload-token");
     }
 
     fn control_rpc_client_with_env_cleared(
