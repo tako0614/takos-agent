@@ -182,11 +182,10 @@ takos-agent-engine = { path = "../../takos-agent-engine" }
   - Takos control plane が catalog / execution を提供する tool 群
 
 tool discovery は control plane の catalog を正としつつ、`skill_*` の実行は
-Rust 側で local intercept します。`skill_list` / `skill_get` は legacy custom
-skill lookup として custom skill のみを返します。managed skill を含む合成 catalog
-は `skill_context` / `skill_catalog` / `skill_describe` が返します。local memory
-tools と `skill_*` は model-visible catalog に直接追加されるとは限らず、remote
-catalog の同名 call や local execution path を Rust container が intercept /
-execute します。同名 tool がある場合に local execution が優先されるのは runtime
-dispatch の話であって、`exposed_tools()` が local tools を常に返すという意味では
-ありません。
+Rust 側で local intercept します。`skill_list` / `skill_get` は custom skill
+のみを返し、managed skill を含む合成 catalog は `skill_context` /
+`skill_catalog` / `skill_describe` が返します。local memory tools と `skill_*`
+は model-visible catalog に直接追加されるとは限らず、remote catalog の同名
+call や local execution path を Rust container が intercept / execute します。
+同名 tool がある場合に local execution が優先されるのは runtime dispatch
+の話で、`exposed_tools()` が local tools を常に返すという意味ではありません。
