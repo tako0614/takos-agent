@@ -81,19 +81,13 @@ run が上限を超えた場合は `503 At capacity` を返します。
 agent-control RPC の canonical path は Takosumi contract export
 `takosumi-contract` の
 `/api/internal/v1/agent-control/*` です。`takos-agent` はこの path family を
-一次 surface として呼びます。executor-host / Takosumi control plane 側は移行互換の
-ため `/rpc/control/*` alias も受け付けますが、新規実装では増やしません。
+一次 surface として呼びます。他の path family は current `takos-agent` の RPC
+surface ではありません。
 
 - `TAKOS_AGENT_CONTROL_RPC_BASE_URL` / `TAKOS_AGENT_CONTROL_RPC_TOKEN`
   - `/api/internal/v1/agent-control/*` 用の明示的な設定名
-- `TAKOS_LEGACY_CONTROL_RPC_BASE_URL` / `TAKOS_LEGACY_CONTROL_RPC_TOKEN`
-  - 旧 `/rpc/control/*` 時代の互換設定名
-- `CONTROL_RPC_BASE_URL` / `CONTROL_RPC_TOKEN`
-  - 既存の互換設定名
-- `TAKOS_CONTROL_RPC_BASE_URL` / `TAKOS_CONTROL_RPC_TOKEN`
-  - 旧互換 alias。新規設定では使わない
 - `/start` payload の `controlRpcBaseUrl` / `controlRpcToken`
-  - executor pool host から渡される fallback
+  - executor pool host から渡される run-local RPC 設定
 - `TAKOSUMI_INTERNAL_URL`
   - tenant/platform Takosumi internal API 用。agent-control RPC の bearer-token transport
     base としては使わない
