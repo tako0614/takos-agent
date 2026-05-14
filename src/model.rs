@@ -240,7 +240,7 @@ impl TakosModelRunner {
             .into());
         }
 
-        self.decode_openai_response(text)
+        self.decode_openai_response(&text)
     }
 
     fn build_openai_request(&self, input: &ModelInput) -> OpenAiChatCompletionRequest {
@@ -280,8 +280,8 @@ impl TakosModelRunner {
         }
     }
 
-    fn decode_openai_response(&self, text: String) -> AppResult<ModelOutput> {
-        let body: OpenAiChatCompletionResponse = serde_json::from_str(&text).map_err(|err| {
+    fn decode_openai_response(&self, text: &str) -> AppResult<ModelOutput> {
+        let body: OpenAiChatCompletionResponse = serde_json::from_str(text).map_err(|err| {
             io::Error::other(format!(
                 "failed to decode OpenAI response: {err}; body={text}"
             ))
