@@ -186,14 +186,11 @@ async fn start(
     if let Err(error) = authorize_start_request(&headers) {
         return error.into_response();
     }
-    let payload = match serde_json::from_slice::<StartPayload>(&body) {
-        Ok(payload) => payload,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "invalid start payload" })),
-            );
-        }
+    let Ok(payload) = serde_json::from_slice::<StartPayload>(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid start payload" })),
+        );
     };
 
     let run_id = payload.run_id.clone();
