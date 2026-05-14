@@ -534,7 +534,7 @@ async fn handle_success(
     usage: UsagePayload,
     tool_executions: Vec<ToolExecutionRecord>,
 ) -> AppResult<()> {
-    let status = run_status_for_loop(response.status.clone());
+    let status = run_status_for_loop(&response.status);
     if let Some(message) = &response.assistant_message {
         let metadata = if tool_executions.is_empty() {
             None
@@ -766,7 +766,7 @@ fn push_tool(
     true
 }
 
-const fn run_status_for_loop(status: LoopStatus) -> &'static str {
+const fn run_status_for_loop(status: &LoopStatus) -> &'static str {
     match status {
         LoopStatus::Finished => "completed",
         LoopStatus::Cancelled => "cancelled",
