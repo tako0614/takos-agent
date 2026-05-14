@@ -128,94 +128,21 @@ impl Distiller for RustSimpleDistiller {
             return Ok(DistillationOutput::default());
         }
 
-        let user_request = input
-            .raw_nodes
-            .iter()
-            .find(|node| node.kind == RawNodeKind::UserUtterance)
-            .map_or_else(
-                || "Untitled session".to_string(),
-                takos_agent_engine::domain::RawNode::content_text,
-            );
+        let user_request = first_node_text(
+            &input.raw_nodes,
+            &RawNodeKind::UserUtterance,
+            "Untitled session",
+        );
+        let assistant_summary = first_node_text(
+            &input.raw_nodes,
+            &RawNodeKind::AssistantUtterance,
+            "No assistant output yet.",
+        );
 
-        let assistant_summary = input
-            .raw_nodes
-            .iter()
-            .find(|node| node.kind == RawNodeKind::AssistantUtterance)
-            .map_or_else(
-                || "No assistant output yet.".to_string(),
-                takos_agent_engine::domain::RawNode::content_text,
-            );
-
-        let mut entities = vec![
-            EntityRef {
-                id: input.session_id.to_string(),
-                label: "session".to_string(),
-            },
-            EntityRef {
-                id: input.loop_id.to_string(),
-                label: "loop".to_string(),
-            },
-        ];
-
-        let mut relations = vec![Relation {
-            subject: input.session_id.to_string(),
-            predicate: "contains_loop".to_string(),
-            object: input.loop_id.to_string(),
-            weight: 1.0,
-            provenance_raw_node_ids: input.raw_nodes.iter().map(|node| node.id).collect(),
-        }];
-
-        for node in &input.raw_nodes {
-            entities.push(EntityRef {
-                id: node.id.to_string(),
-                label: format!("raw:{:?}", node.kind),
-            });
-            relations.push(Relation {
-                subject: input.loop_id.to_string(),
-                predicate: match node.kind {
-                    RawNodeKind::UserUtterance => "captures_request".to_string(),
-                    RawNodeKind::AssistantUtterance => "captures_response".to_string(),
-                    RawNodeKind::ToolResult => "records_tool_result".to_string(),
-                    RawNodeKind::Note => "records_note".to_string(),
-                    RawNodeKind::Event => "records_event".to_string(),
-                },
-                object: node.id.to_string(),
-                weight: 0.8,
-                provenance_raw_node_ids: vec![node.id],
-            });
-
-            if node.kind == RawNodeKind::ToolResult {
-                relations.push(Relation {
-                    subject: node.metadata.source.clone(),
-                    predicate: "produced".to_string(),
-                    object: node.id.to_string(),
-                    weight: 0.7,
-                    provenance_raw_node_ids: vec![node.id],
-                });
-            }
-        }
-
-        for abstract_id in &input.activated_abstract_ids {
-            relations.push(Relation {
-                subject: input.loop_id.to_string(),
-                predicate: "informed_by".to_string(),
-                object: abstract_id.to_string(),
-                weight: 0.85,
-                provenance_raw_node_ids: input.raw_nodes.iter().map(|node| node.id).collect(),
-            });
-        }
-
-        entities.sort_by(|left, right| {
-            left.id
-                .cmp(&right.id)
-                .then_with(|| left.label.cmp(&right.label))
-        });
-        relations.sort_by(|left, right| {
-            left.subject
-                .cmp(&right.subject)
-                .then_with(|| left.predicate.cmp(&right.predicate))
-                .then_with(|| left.object.cmp(&right.object))
-        });
+        let GraphFragment {
+            entities,
+            relations,
+        } = build_distillation_graph(&input);
 
         let abstract_node = AbstractNode::new(
             truncate_title(&user_request),
@@ -256,6 +183,98 @@ impl Distiller for RustSimpleDistiller {
             new_nodes: vec![abstract_node],
             raw_updates,
         })
+    }
+}
+
+fn first_node_text(
+    raw_nodes: &[takos_agent_engine::domain::RawNode],
+    kind: &RawNodeKind,
+    fallback: &str,
+) -> String {
+    raw_nodes
+        .iter()
+        .find(|node| &node.kind == kind)
+        .map_or_else(
+            || fallback.to_string(),
+            takos_agent_engine::domain::RawNode::content_text,
+        )
+}
+
+fn build_distillation_graph(input: &DistillationInput) -> GraphFragment {
+    let mut entities = vec![
+        EntityRef {
+            id: input.session_id.to_string(),
+            label: "session".to_string(),
+        },
+        EntityRef {
+            id: input.loop_id.to_string(),
+            label: "loop".to_string(),
+        },
+    ];
+
+    let mut relations = vec![Relation {
+        subject: input.session_id.to_string(),
+        predicate: "contains_loop".to_string(),
+        object: input.loop_id.to_string(),
+        weight: 1.0,
+        provenance_raw_node_ids: input.raw_nodes.iter().map(|node| node.id).collect(),
+    }];
+
+    for node in &input.raw_nodes {
+        entities.push(EntityRef {
+            id: node.id.to_string(),
+            label: format!("raw:{:?}", node.kind),
+        });
+        relations.push(Relation {
+            subject: input.loop_id.to_string(),
+            predicate: match node.kind {
+                RawNodeKind::UserUtterance => "captures_request".to_string(),
+                RawNodeKind::AssistantUtterance => "captures_response".to_string(),
+                RawNodeKind::ToolResult => "records_tool_result".to_string(),
+                RawNodeKind::Note => "records_note".to_string(),
+                RawNodeKind::Event => "records_event".to_string(),
+            },
+            object: node.id.to_string(),
+            weight: 0.8,
+            provenance_raw_node_ids: vec![node.id],
+        });
+
+        if node.kind == RawNodeKind::ToolResult {
+            relations.push(Relation {
+                subject: node.metadata.source.clone(),
+                predicate: "produced".to_string(),
+                object: node.id.to_string(),
+                weight: 0.7,
+                provenance_raw_node_ids: vec![node.id],
+            });
+        }
+    }
+
+    for abstract_id in &input.activated_abstract_ids {
+        relations.push(Relation {
+            subject: input.loop_id.to_string(),
+            predicate: "informed_by".to_string(),
+            object: abstract_id.to_string(),
+            weight: 0.85,
+            provenance_raw_node_ids: input.raw_nodes.iter().map(|node| node.id).collect(),
+        });
+    }
+
+    entities.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    relations.sort_by(|left, right| {
+        left.subject
+            .cmp(&right.subject)
+            .then_with(|| left.predicate.cmp(&right.predicate))
+            .then_with(|| left.object.cmp(&right.object))
+    });
+
+    GraphFragment {
+        entities,
+        relations,
     }
 }
 

@@ -314,8 +314,19 @@ fn constant_time_equal(actual: &str, expected: &str) -> bool {
     diff == 0
 }
 
-async fn execute_run(payload: StartPayload, state: Arc<ServiceState>) -> AppResult<()> {
-    let client = ControlRpcClient::new(&payload)?;
+struct RunContextBundle {
+    bootstrap: crate::control_rpc::RunBootstrap,
+    run_config: crate::control_rpc::RunConfigResponse,
+    tool_catalog: crate::control_rpc::ToolCatalogResponse,
+    manual_catalog: crate::control_rpc::SkillCatalogResponse,
+    manual_count: usize,
+    user_message: String,
+}
+
+async fn load_run_context(
+    client: &ControlRpcClient,
+    payload: &StartPayload,
+) -> AppResult<RunContextBundle> {
     let bootstrap = client.run_bootstrap().await?;
     let run_context = client.run_context().await.ok();
     let run_config = client.run_config(bootstrap.agent_type.as_deref()).await?;
@@ -356,6 +367,32 @@ async fn execute_run(payload: StartPayload, state: Arc<ServiceState>) -> AppResu
             .and_then(|context| context.last_user_message.as_deref()),
     )
     .ok_or_else(|| io::Error::other("failed to resolve the current user message for this run"))?;
+
+    Ok(RunContextBundle {
+        bootstrap,
+        run_config,
+        tool_catalog,
+        manual_catalog,
+        manual_count,
+        user_message,
+    })
+}
+
+// Orchestrates one run end-to-end: every block here is either a single
+// build/emit call or the run/cleanup hand-off, so further splitting would
+// fragment the lifecycle without isolating concerns.
+#[allow(clippy::too_many_lines)]
+async fn execute_run(payload: StartPayload, state: Arc<ServiceState>) -> AppResult<()> {
+    let client = ControlRpcClient::new(&payload)?;
+    let context = load_run_context(&client, &payload).await?;
+    let RunContextBundle {
+        bootstrap,
+        run_config,
+        tool_catalog,
+        manual_catalog,
+        manual_count,
+        user_message,
+    } = context;
 
     let engine_config = build_engine_config(
         &run_config,
