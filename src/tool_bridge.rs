@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
-use serde_json::json;
+use serde_json::{json, Value};
 use takos_agent_engine::model::ToolCallRequest;
 use takos_agent_engine::tools::executor::{DefaultToolExecutor, ToolCallResult, ToolExecutor};
 use takos_agent_engine::tools::memory_tools::MemoryTools;
@@ -93,51 +93,71 @@ impl ToolExecutor for CompositeToolExecutor {
         );
 
         if LOCAL_SKILL_TOOL_NAMES.contains(&tool_name.as_str()) {
-            emit_tool_call_event(&self.client, &tool_call_id, &tool_name, &tool_arguments)
-                .await
-                .ok();
-            emit_thinking_event(&self.client, format!("Running tool {tool_name}"))
-                .await
-                .ok();
-            let output = execute_local_skill_tool(
-                &tool_name,
-                &tool_arguments,
-                self.local_skill_catalog.as_ref(),
-            )
-            .ok_or_else(|| {
-                EngineError::Tool(format!("unsupported local skill tool {tool_name}"))
-            })?;
-            let summary = format!("{} output={}", tool_name, truncate_summary(&output));
-            self.client
-                .emit_run_event(
-                    "tool_result",
-                    tool_result_event(&tool_call_id, &tool_name, &summary, &output, None),
-                )
-                .await
-                .ok();
-            self.record_tool_execution(ToolExecutionRecord {
-                tool_call_id,
-                name: tool_name.clone(),
-                arguments: tool_arguments.clone(),
-                summary: summary.clone(),
-                result: Some(output.clone()),
-                output: output.clone(),
-                error: None,
-            });
-            emit_thinking_event(&self.client, format!("Tool {tool_name} finished"))
-                .await
-                .ok();
-            return Ok(ToolCallResult {
-                name: tool_name,
-                content: json!({ "output": output }),
-                summary,
-            });
+            return self
+                .execute_local_skill(&tool_call_id, &tool_name, &tool_arguments)
+                .await;
         }
 
+        self.execute_remote_tool(&tool_call_id, &tool_name, &tool_arguments)
+            .await
+    }
+}
+
+impl CompositeToolExecutor {
+    async fn execute_local_skill(
+        &self,
+        tool_call_id: &str,
+        tool_name: &str,
+        tool_arguments: &Value,
+    ) -> Result<ToolCallResult> {
+        emit_tool_call_event(&self.client, tool_call_id, tool_name, tool_arguments)
+            .await
+            .ok();
+        emit_thinking_event(&self.client, format!("Running tool {tool_name}"))
+            .await
+            .ok();
+        let output =
+            execute_local_skill_tool(tool_name, tool_arguments, self.local_skill_catalog.as_ref())
+                .ok_or_else(|| {
+                    EngineError::Tool(format!("unsupported local skill tool {tool_name}"))
+                })?;
+        let summary = format!("{} output={}", tool_name, truncate_summary(&output));
+        self.client
+            .emit_run_event(
+                "tool_result",
+                tool_result_event(tool_call_id, tool_name, &summary, &output, None),
+            )
+            .await
+            .ok();
+        self.record_tool_execution(ToolExecutionRecord {
+            tool_call_id: tool_call_id.to_string(),
+            name: tool_name.to_string(),
+            arguments: tool_arguments.clone(),
+            summary: summary.clone(),
+            result: Some(output.clone()),
+            output: output.clone(),
+            error: None,
+        });
+        emit_thinking_event(&self.client, format!("Tool {tool_name} finished"))
+            .await
+            .ok();
+        Ok(ToolCallResult {
+            name: tool_name.to_string(),
+            content: json!({ "output": output }),
+            summary,
+        })
+    }
+
+    async fn execute_remote_tool(
+        &self,
+        tool_call_id: &str,
+        tool_name: &str,
+        tool_arguments: &Value,
+    ) -> Result<ToolCallResult> {
         self.client
             .emit_run_event(
                 "tool_call",
-                tool_call_event(&tool_call_id, &tool_name, &tool_arguments),
+                tool_call_event(tool_call_id, tool_name, tool_arguments),
             )
             .await
             .ok();
@@ -147,7 +167,7 @@ impl ToolExecutor for CompositeToolExecutor {
 
         let rpc_result = match self
             .client
-            .tool_execute(&tool_name, tool_arguments.clone())
+            .tool_execute(tool_name, tool_arguments.clone())
             .await
         {
             Ok(result) => result,
@@ -157,7 +177,7 @@ impl ToolExecutor for CompositeToolExecutor {
                 self.client
                     .emit_run_event(
                         "tool_result",
-                        tool_result_event(&tool_call_id, &tool_name, &summary, "", Some(&error)),
+                        tool_result_event(tool_call_id, tool_name, &summary, "", Some(&error)),
                     )
                     .await
                     .ok();
@@ -168,13 +188,13 @@ impl ToolExecutor for CompositeToolExecutor {
             }
         };
 
-        let result = rpc_tool_result_to_engine(&tool_name, rpc_result.clone());
+        let result = rpc_tool_result_to_engine(tool_name, rpc_result.clone());
         let (output, error) = rpc_tool_result_output_and_error(&rpc_result);
         self.client
             .emit_run_event(
                 "tool_result",
                 tool_result_event(
-                    &tool_call_id,
+                    tool_call_id,
                     &result.name,
                     &result.summary,
                     &output,
@@ -184,7 +204,7 @@ impl ToolExecutor for CompositeToolExecutor {
             .await
             .ok();
         self.record_tool_execution(ToolExecutionRecord {
-            tool_call_id,
+            tool_call_id: tool_call_id.to_string(),
             name: result.name.clone(),
             arguments: tool_arguments.clone(),
             summary: result.summary.clone(),
