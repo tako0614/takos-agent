@@ -98,7 +98,8 @@ tool execute / heartbeat / status update / run event などの surface を明示
 経由で起動された run では `installationId` と `runtimeNamespace` を任意で返せます。
 `takos-agent` は Accounts ledger や RuntimeBinding を所有せず、この context を
 消費して local memory store を `spaces/<spaceId>/installations/<installationId>`
-に隔離します。`installationId` が無い run は従来通り `spaces/<spaceId>` を使います。
+に隔離します。`installationId` が無い run は space-scoped local run として
+`spaces/<spaceId>` を使います。
 
 `/api/internal/v1/agent-control/run-config` の budget は `maxGraphSteps` / `maxToolRounds`
 を正本の field name として読みます。snake_case alias は current contract ではありません。
