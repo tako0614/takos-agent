@@ -296,7 +296,12 @@ fn timestamp_within_skew(
 fn current_time_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
+        .map(|duration| {
+            // i64 ms holds dates well past year 292,000,000 — safe in practice.
+            #[allow(clippy::cast_possible_truncation)]
+            let millis = duration.as_millis() as i64;
+            millis
+        })
         .unwrap_or(0)
 }
 
