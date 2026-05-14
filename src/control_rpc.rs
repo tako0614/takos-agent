@@ -724,10 +724,12 @@ fn u32_field(payload: &Value, keys: &[&str]) -> Option<u32> {
 
 fn f32_field(payload: &Value, keys: &[&str]) -> Option<f32> {
     keys.iter().find_map(|key| {
-        payload
-            .get(*key)
-            .and_then(Value::as_f64)
-            .map(|value| value as f32)
+        payload.get(*key).and_then(Value::as_f64).map(|value| {
+            // Config knobs (temperature, top_p, etc.) — f32 precision is sufficient.
+            #[allow(clippy::cast_possible_truncation)]
+            let narrowed = value as f32;
+            narrowed
+        })
     })
 }
 
