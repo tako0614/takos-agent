@@ -905,7 +905,7 @@ mod tests {
             String::from_utf8(request).expect("request should be utf8")
         });
 
-        let client = control_rpc_client_with_env_cleared(StartPayload {
+        let client = control_rpc_client_with_env_cleared(&StartPayload {
             run_id: "run-test".to_string(),
             worker_id: "worker-test".to_string(),
             service_id: Some("service-test".to_string()),
@@ -978,7 +978,7 @@ mod tests {
             String::from_utf8(request).expect("request should be utf8")
         });
 
-        let client = control_rpc_client_with_env_cleared(StartPayload {
+        let client = control_rpc_client_with_env_cleared(&StartPayload {
             run_id: "run-test".to_string(),
             worker_id: "worker-test".to_string(),
             service_id: Some("service-test".to_string()),
@@ -1075,7 +1075,7 @@ mod tests {
             String::from_utf8(request).expect("request should be utf8")
         });
 
-        let client = control_rpc_client_with_env_cleared(StartPayload {
+        let client = control_rpc_client_with_env_cleared(&StartPayload {
             run_id: "run-test".to_string(),
             worker_id: "worker-test".to_string(),
             service_id: Some("service-test".to_string()),
@@ -1197,14 +1197,14 @@ mod tests {
     }
 
     fn control_rpc_client_with_env_cleared(
-        payload: StartPayload,
+        payload: &StartPayload,
     ) -> crate::AppResult<ControlRpcClient> {
         let _guard = CONTROL_RPC_ENV_LOCK
             .lock()
             .expect("env lock should not be poisoned");
         let saved = saved_control_rpc_env();
         clear_control_rpc_env();
-        let result = ControlRpcClient::new(&payload);
+        let result = ControlRpcClient::new(payload);
         restore_control_rpc_env(saved);
         result
     }

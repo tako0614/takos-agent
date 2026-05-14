@@ -329,7 +329,7 @@ pub fn resolve_embedding_backend_config(
     resolve_embedding_backend_config_from_values(
         run_config,
         control_openai_api_key,
-        EnvEmbeddingConfig {
+        &EnvEmbeddingConfig {
             provider: first_nonempty_env(&["TAKOS_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER"]),
             model: first_nonempty_env(&[
                 "TAKOS_EMBEDDING_MODEL",
@@ -483,7 +483,7 @@ struct EnvEmbeddingConfig {
 fn resolve_embedding_backend_config_from_values(
     run_config: &RunConfigResponse,
     control_openai_api_key: Option<&str>,
-    env_config: EnvEmbeddingConfig,
+    env_config: &EnvEmbeddingConfig,
 ) -> AppResult<Option<EmbeddingBackendConfig>> {
     let provider = first_nonempty([
         env_config.provider.as_deref(),
@@ -653,7 +653,7 @@ mod tests {
         let config = resolve_embedding_backend_config_from_values(
             &RunConfigResponse::default(),
             None,
-            EnvEmbeddingConfig::default(),
+            &EnvEmbeddingConfig::default(),
         )
         .expect("embedding config should resolve");
 
@@ -672,7 +672,7 @@ mod tests {
                 ..Default::default()
             },
             Some("api-key-from-control-secret"),
-            EnvEmbeddingConfig {
+            &EnvEmbeddingConfig {
                 provider: Some("openai-compatible".to_string()),
                 model: Some("env-model".to_string()),
                 base_url: Some("https://env.example/v1".to_string()),

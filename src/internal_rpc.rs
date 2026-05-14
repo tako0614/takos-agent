@@ -76,12 +76,12 @@ pub struct VerifiedInternalRpc {
     pub timestamp: String,
 }
 
-pub fn sign_internal_rpc(input: InternalRpcSignInput<'_>) -> Result<SignedInternalRpc, String> {
+pub fn sign_internal_rpc(input: &InternalRpcSignInput<'_>) -> Result<SignedInternalRpc, String> {
     let actor_context = encode_actor_context(input.actor)?;
     let body_digest = sha256_hex(input.body);
     let request_id = input.request_id.unwrap_or(&input.actor.request_id);
     let capabilities = normalize_capabilities(input.capabilities);
-    let canonical = canonical_internal_rpc(CanonicalInternalRpcParts {
+    let canonical = canonical_internal_rpc(&CanonicalInternalRpcParts {
         method: input.method,
         path: input.path,
         query: input.query,
@@ -115,7 +115,7 @@ pub fn sign_internal_rpc(input: InternalRpcSignInput<'_>) -> Result<SignedIntern
 }
 
 pub fn verify_internal_rpc(
-    input: InternalRpcVerifyInput<'_>,
+    input: &InternalRpcVerifyInput<'_>,
 ) -> Result<Option<VerifiedInternalRpc>, String> {
     let version = read_header(input.headers, "x-takos-internal-version");
     if version != Some(TAKOS_INTERNAL_RPC_VERSION) {
@@ -172,7 +172,7 @@ pub fn verify_internal_rpc(
     if actor.request_id != request_id {
         return Ok(None);
     }
-    let canonical = canonical_internal_rpc(CanonicalInternalRpcParts {
+    let canonical = canonical_internal_rpc(&CanonicalInternalRpcParts {
         method: input.method,
         path: input.path,
         query: input.query,
@@ -214,7 +214,7 @@ struct CanonicalInternalRpcParts<'a> {
     actor_context: &'a str,
 }
 
-fn canonical_internal_rpc(parts: CanonicalInternalRpcParts<'_>) -> String {
+fn canonical_internal_rpc(parts: &CanonicalInternalRpcParts<'_>) -> String {
     [
         TAKOS_INTERNAL_RPC_VERSION,
         &parts.method.to_uppercase(),
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn signs_and_verifies_v3_internal_rpc() {
         let actor = actor();
-        let signed = sign_internal_rpc(InternalRpcSignInput {
+        let signed = sign_internal_rpc(&InternalRpcSignInput {
             method: "post",
             path: "/api/internal/v1/runtime/agents/agent_1/heartbeat",
             query: Some("?trace=1"),
@@ -361,7 +361,7 @@ mod tests {
         })
         .expect("sign");
 
-        let verified = verify_internal_rpc(InternalRpcVerifyInput {
+        let verified = verify_internal_rpc(&InternalRpcVerifyInput {
             method: "POST",
             path: "/api/internal/v1/runtime/agents/agent_1/heartbeat",
             query: Some("?trace=1"),
@@ -386,7 +386,7 @@ mod tests {
     #[test]
     fn rejects_body_and_capability_mismatch() {
         let actor = actor();
-        let signed = sign_internal_rpc(InternalRpcSignInput {
+        let signed = sign_internal_rpc(&InternalRpcSignInput {
             method: "GET",
             path: "/internal/repositories",
             query: None,
@@ -402,7 +402,7 @@ mod tests {
         })
         .expect("sign");
 
-        assert!(verify_internal_rpc(InternalRpcVerifyInput {
+        assert!(verify_internal_rpc(&InternalRpcVerifyInput {
             method: "GET",
             path: "/internal/repositories",
             query: None,
@@ -418,7 +418,7 @@ mod tests {
         .expect("verify")
         .is_none());
 
-        assert!(verify_internal_rpc(InternalRpcVerifyInput {
+        assert!(verify_internal_rpc(&InternalRpcVerifyInput {
             method: "GET",
             path: "/internal/repositories",
             query: None,
