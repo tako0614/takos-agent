@@ -99,7 +99,7 @@ impl TakosModelRunner {
         self.model == "local-smoke"
     }
 
-    fn build_runner_prompt(&self, input: &ModelInput) -> String {
+    fn build_runner_prompt(input: &ModelInput) -> String {
         let mut sections = Vec::new();
         if !input.session_context.is_empty() {
             sections.push(format!(
@@ -272,7 +272,7 @@ impl TakosModelRunner {
                 },
                 OpenAiRequestMessage {
                     role: "user".to_string(),
-                    content: Some(Value::String(self.build_runner_prompt(input))),
+                    content: Some(Value::String(Self::build_runner_prompt(input))),
                 },
             ],
             tools,
@@ -379,8 +379,8 @@ fn is_openai_auth_failure(error: &str) -> bool {
 }
 
 fn sanitize_provider_error_body(body: &str) -> String {
-    let redacted = redact_secret_like_tokens(body);
     const MAX_ERROR_BODY_CHARS: usize = 512;
+    let redacted = redact_secret_like_tokens(body);
     if redacted.chars().count() <= MAX_ERROR_BODY_CHARS {
         return redacted;
     }
