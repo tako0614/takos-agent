@@ -99,7 +99,7 @@ Takosumi 側の contract export では、run bootstrap / context / config / tool
 tool execute / heartbeat / status update / run event などの surface を明示します。
 `run-bootstrap` は `spaceId` を必須 context とし、shared-cell / AppInstallation
 経由で起動された run では `installationId` と `runtimeNamespace` を任意で返せます。
-`takos-agent` は Accounts ledger や RuntimeBinding を所有せず、この context を
+`takos-agent` は Accounts ledger や Installation runtime mode を所有せず、この context を
 消費して local memory store を `spaces/<spaceId>/installations/<installationId>`
 に隔離します。`installationId` が無い run は space-scoped local run として
 `spaces/<spaceId>` を使います。
