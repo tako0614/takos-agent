@@ -97,7 +97,7 @@ surface ではありません。
 
 Takosumi 側の contract export では、run bootstrap / context / config / tool catalog /
 tool execute / heartbeat / status update / run event などの surface を明示します。
-`run-bootstrap` は `spaceId` を必須 context とし、shared-cell / AppInstallation
+`run-bootstrap` は `spaceId` を必須 context とし、shared-cell / Installation
 経由で起動された run では `installationId` と `runtimeNamespace` を任意で返せます。
 `takos-agent` は Accounts ledger や Installation runtime mode を所有せず、この context を
 消費して local memory store を `spaces/<spaceId>/installations/<installationId>`
