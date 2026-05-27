@@ -15,6 +15,18 @@ use crate::AppResult;
 /// feature can override it without editing the production code path.
 const DEFAULT_OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
 
+/// Returns the model endpoint, preferring the `TAKOS_AGENT_MODEL_ENDPOINT`
+/// environment variable over the compiled-in default.
+fn get_model_endpoint() -> String {
+    std::env::var("TAKOS_AGENT_MODEL_ENDPOINT")
+        .unwrap_or_else(|_| DEFAULT_OPENAI_ENDPOINT.to_string())
+}
+
+/// Returns the model name override from `TAKOS_AGENT_MODEL_NAME` if set.
+fn get_model_name_override() -> Option<String> {
+    std::env::var("TAKOS_AGENT_MODEL_NAME").ok().filter(|v| !v.is_empty())
+}
+
 #[derive(Clone)]
 pub struct TakosModelRunner {
     client: reqwest::Client,
@@ -51,14 +63,15 @@ impl TakosModelRunner {
         tools: Vec<ToolDefinition>,
         usage_tracker: Arc<UsageTracker>,
     ) -> Self {
+        let resolved_model = get_model_name_override().unwrap_or_else(|| model.into());
         Self {
             client: reqwest::Client::new(),
-            model: model.into(),
+            model: resolved_model,
             temperature,
             openai_api_keys: Arc::new(sanitize_api_keys(openai_api_keys)),
             tools: Arc::new(tools),
             usage_tracker,
-            endpoint: Arc::new(DEFAULT_OPENAI_ENDPOINT.to_string()),
+            endpoint: Arc::new(get_model_endpoint()),
         }
     }
 

@@ -39,6 +39,7 @@ use crate::tool_bridge::{CompositeToolExecutor, ToolExecutionRecord};
 pub type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 const DEFAULT_MAX_CONCURRENT_RUNS: usize = 5;
+const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 15;
 const OPENAI_MAX_TOOL_DEFINITIONS: usize = 128;
 const TOOLBOX_TOOL_NAME: &str = "toolbox";
 const CORE_DIRECT_TOOL_NAMES: [&str; 30] = [
@@ -467,7 +468,9 @@ async fn execute_run(payload: StartPayload, state: Arc<ServiceState>) -> AppResu
     let heartbeat_handle = tokio::spawn(heartbeat_loop(
         client.clone(),
         cancellation_token.clone(),
-        Duration::from_secs(15),
+        Duration::from_secs(parse_heartbeat_interval_secs(
+            env::var("TAKOS_AGENT_HEARTBEAT_INTERVAL_SECS").ok(),
+        )),
     ));
     client
         .emit_run_event(
@@ -761,7 +764,7 @@ fn select_model_tools(
                 continue;
             }
             push_tool(tool, &mut selected, &mut seen);
-            if selected.len() >= OPENAI_MAX_TOOL_DEFINITIONS {
+            if selected.len() >= max_tool_definitions() {
                 break;
             }
         }
@@ -780,7 +783,7 @@ fn push_tool_by_name(
     selected: &mut Vec<crate::control_rpc::ToolDefinition>,
     seen: &mut HashSet<String>,
 ) {
-    if selected.len() >= OPENAI_MAX_TOOL_DEFINITIONS {
+    if selected.len() >= max_tool_definitions() {
         return;
     }
     if let Some(tool) = tools.iter().find(|tool| tool.name == name) {
@@ -793,7 +796,7 @@ fn push_tool(
     selected: &mut Vec<crate::control_rpc::ToolDefinition>,
     seen: &mut HashSet<String>,
 ) -> bool {
-    if selected.len() >= OPENAI_MAX_TOOL_DEFINITIONS || !seen.insert(tool.name.clone()) {
+    if selected.len() >= max_tool_definitions() || !seen.insert(tool.name.clone()) {
         return false;
     }
     selected.push(tool.clone());
@@ -832,6 +835,29 @@ fn parse_max_concurrent_runs(raw: Option<String>) -> usize {
         .ok()
         .filter(|value| *value >= 1)
         .unwrap_or(DEFAULT_MAX_CONCURRENT_RUNS)
+}
+
+fn parse_heartbeat_interval_secs(raw: Option<String>) -> u64 {
+    let Some(raw) = raw else {
+        return DEFAULT_HEARTBEAT_INTERVAL_SECS;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return DEFAULT_HEARTBEAT_INTERVAL_SECS;
+    }
+    trimmed
+        .parse::<u64>()
+        .ok()
+        .filter(|v| *v >= 1)
+        .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL_SECS)
+}
+
+fn max_tool_definitions() -> usize {
+    env::var("TAKOS_AGENT_MAX_TOOL_DEFINITIONS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|v| *v >= 1)
+        .unwrap_or(OPENAI_MAX_TOOL_DEFINITIONS)
 }
 
 #[cfg(test)]
