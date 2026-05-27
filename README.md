@@ -129,20 +129,25 @@ production memory retrieval の backend として扱いません。
 
 ## Repository layout
 
-この repo は standalone build のため、`takos-agent-engine` を pinned git dependency
-として参照します。
+この service は `takos-agent-engine` の sibling checkout を使って build します。
+Docker image は ecosystem root を build context にして、`takos/agent` と
+`takos-agent-engine` を同じ context に入れます。
 
 ```text
-agent/
+takos/
+  agent/
+    Cargo.toml
+    Dockerfile
+    src/
+takos-agent-engine/
   Cargo.toml
-  Dockerfile
   src/
 ```
 
-Docker image は agent repo root を build context にして作成します。
+Docker image は ecosystem root から作成します。
 
 ```sh
-docker build -t takos-agent .
+docker build -f takos/agent/Dockerfile -t takos-agent .
 ```
 
 Live smoke は opt-in です。`TAKOS_AGENT_INTERNAL_URL` が未設定の場合は skip

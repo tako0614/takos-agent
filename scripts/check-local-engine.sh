@@ -18,7 +18,13 @@ trap cleanup EXIT
 
 work_dir="${tmp_dir}/takos-agent"
 mkdir -p "${work_dir}"
-cp "${agent_dir}/Cargo.toml" "${agent_dir}/Cargo.lock" "${work_dir}/"
+awk -v engine_dir="${engine_dir}" '
+  /takos-agent-engine = \{ path = "\.\.\/\.\.\/takos-agent-engine"/ {
+    sub(/path = "\.\.\/\.\.\/takos-agent-engine"/, "path = \"" engine_dir "\"")
+  }
+  { print }
+' "${agent_dir}/Cargo.toml" > "${work_dir}/Cargo.toml"
+cp "${agent_dir}/Cargo.lock" "${work_dir}/"
 cp -R "${agent_dir}/src" "${agent_dir}/tests" "${work_dir}/"
 
 cat >> "${work_dir}/Cargo.toml" <<EOF
