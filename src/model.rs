@@ -24,7 +24,9 @@ fn get_model_endpoint() -> String {
 
 /// Returns the model name override from `TAKOS_AGENT_MODEL_NAME` if set.
 fn get_model_name_override() -> Option<String> {
-    std::env::var("TAKOS_AGENT_MODEL_NAME").ok().filter(|v| !v.is_empty())
+    std::env::var("TAKOS_AGENT_MODEL_NAME")
+        .ok()
+        .filter(|v| !v.is_empty())
 }
 
 #[derive(Clone)]
