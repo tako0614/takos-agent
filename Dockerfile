@@ -14,13 +14,17 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --uid 10001 takos
-RUN mkdir -p /var/lib/takos/agent \
-  && chown -R takos:takos /var/lib/takos
+RUN mkdir -p /tmp/takos-agent \
+  && chown -R takos:takos /tmp/takos-agent
 
 COPY --from=builder /work/target/release/takos-agent /usr/local/bin/takos-agent
 
 ENV PORT=8080 \
   TAKOS_AGENT_DATA_DIR=/tmp/takos-agent
+
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+  CMD curl -f http://localhost:8080/health || exit 1
 
 USER takos
 WORKDIR /app
