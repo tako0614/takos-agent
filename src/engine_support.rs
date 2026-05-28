@@ -575,20 +575,33 @@ fn nonempty_string(value: &str) -> Option<String> {
     }
 }
 
+/// Truncates a distillation title to at most 64 bytes while keeping the cut on
+/// a UTF-8 char boundary. Multi-byte input (e.g. Japanese titles) used to
+/// panic here because `&trimmed[..61]` sliced through a code point.
 fn truncate_title(source: &str) -> String {
+    const TARGET_LEN: usize = 64;
+    const PREFIX_BUDGET: usize = TARGET_LEN - 3; // 3 bytes reserved for "..."
+
     let trimmed = source.trim();
-    if trimmed.len() <= 64 {
-        trimmed.to_string()
-    } else {
-        format!("{}...", &trimmed[..61])
+    if trimmed.len() <= TARGET_LEN {
+        return trimmed.to_string();
     }
+
+    let mut safe_cut = 0;
+    for (offset, _) in trimmed.char_indices() {
+        if offset > PREFIX_BUDGET {
+            break;
+        }
+        safe_cut = offset;
+    }
+    format!("{}...", &trimmed[..safe_cut])
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         build_embedder, build_engine_config, resolve_embedding_backend_config_from_values,
-        safe_run_store_path, EmbeddingBackendConfig, EnvEmbeddingConfig,
+        safe_run_store_path, truncate_title, EmbeddingBackendConfig, EnvEmbeddingConfig,
     };
     use crate::control_rpc::RunConfigResponse;
     use crate::prompts::system_prompt_for_agent_type;
@@ -598,6 +611,34 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
+
+    #[test]
+    fn truncate_title_preserves_short_ascii_input() {
+        assert_eq!(truncate_title("hello"), "hello");
+        assert_eq!(truncate_title("  hello  "), "hello");
+    }
+
+    #[test]
+    fn truncate_title_does_not_panic_on_multibyte_input() {
+        let source = "日本語の長いタイトル".repeat(8);
+        let truncated = truncate_title(&source);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.len() <= 64);
+        assert!(
+            truncated.is_char_boundary(truncated.len()),
+            "truncate_title must keep multi-byte input on a char boundary",
+        );
+        // Sanity: the prefix should contain at least one full code point from the source.
+        assert!(truncated.starts_with('日'));
+    }
+
+    #[test]
+    fn truncate_title_truncates_long_ascii_input_with_ellipsis() {
+        let source = "a".repeat(80);
+        let truncated = truncate_title(&source);
+        assert!(truncated.ends_with("..."));
+        assert_eq!(truncated.len(), 64);
+    }
 
     #[test]
     fn build_engine_config_prefers_control_system_prompt() {

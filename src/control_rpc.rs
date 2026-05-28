@@ -1,16 +1,36 @@
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use std::{env, io};
 
+use chrono::Utc;
 use reqwest::StatusCode;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::internal_rpc::{sign_internal_rpc, InternalRpcSignInput, TakosActorContext};
 use crate::AppResult;
+
+/// Connect + read timeout for control-plane RPC calls. Picked to be short
+/// enough that a stalled control plane can't keep an agent run wedged forever
+/// while still giving room for normal Cloudflare round-trips.
+const CONTROL_RPC_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 const CONTROL_RPC_BASE_URL_ENV_KEY: &str = "TAKOS_AGENT_CONTROL_RPC_BASE_URL";
 const CONTROL_RPC_TOKEN_ENV_KEY: &str = "TAKOS_AGENT_CONTROL_RPC_TOKEN";
 const AGENT_CONTROL_RPC_PATH_PREFIX: &str = "/api/internal/v1/agent-control";
+/// Operator-provided HMAC key for signing outbound control-plane RPC requests
+/// using the shared `takos-internal-v3` envelope. When set, every `post_json`
+/// caller signs its body with this key. The receiver (`takos/app`) MUST
+/// independently configure the same key and run `verify_internal_rpc` over
+/// incoming requests before trusting the bearer token — without that, this
+/// header is purely advisory and any plain-bearer leak would still let an
+/// attacker forge calls.
+const CONTROL_RPC_INTERNAL_KEY_ENV_KEY: &str = "TAKOS_AGENT_INTERNAL_RPC_KEY";
+const CONTROL_RPC_INTERNAL_CALLER: &str = "takos-agent";
+const CONTROL_RPC_INTERNAL_AUDIENCE: &str = "takos-app";
+const CONTROL_RPC_INTERNAL_CAPABILITY: &str = "agent-control.rpc";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -243,18 +263,22 @@ pub struct ControlRpcClient {
     executor_tier: Option<u8>,
     executor_container_id: Option<String>,
     sequence: Arc<AtomicU64>,
+    internal_rpc_key: Option<String>,
+    nonce_counter: Arc<AtomicU64>,
 }
 
 impl ControlRpcClient {
     pub fn new(payload: &StartPayload) -> AppResult<Self> {
         let http = reqwest::Client::builder()
             .user_agent("takos-agent/0.1.0")
+            .timeout(CONTROL_RPC_HTTP_TIMEOUT)
             .build()?;
         let (base_url, token) = resolve_control_rpc_config(
             payload,
             nonempty_env(CONTROL_RPC_BASE_URL_ENV_KEY),
             nonempty_env(CONTROL_RPC_TOKEN_ENV_KEY),
         )?;
+        let internal_rpc_key = nonempty_env(CONTROL_RPC_INTERNAL_KEY_ENV_KEY);
         Ok(Self {
             http,
             base_url,
@@ -265,6 +289,8 @@ impl ControlRpcClient {
             executor_tier: payload.executor_tier,
             executor_container_id: payload.executor_container_id.clone(),
             sequence: Arc::new(AtomicU64::new(1)),
+            internal_rpc_key,
+            nonce_counter: Arc::new(AtomicU64::new(1)),
         })
     }
 
@@ -614,10 +640,21 @@ impl ControlRpcClient {
 
     async fn post_json<T: DeserializeOwned>(&self, path: &str, body: Value) -> AppResult<T> {
         let url = format!("{}{}", self.base_url, path);
+        // Serialize the body to a deterministic JSON string so the HMAC body
+        // digest covers exactly the bytes we send on the wire.
+        let body_bytes = serde_json::to_vec(&body).map_err(|err| {
+            io::Error::other(format!("failed to encode {path} request body: {err}"))
+        })?;
+        let body_string = std::str::from_utf8(&body_bytes)
+            .map_err(|err| {
+                io::Error::other(format!("{path} request body is not valid utf-8: {err}"))
+            })?
+            .to_string();
         let mut request = self
             .http
             .post(url)
             .bearer_auth(&self.token)
+            .header("Content-Type", "application/json")
             .header("X-Takos-Run-Id", &self.run_id);
         if let Some(executor_tier) = self.executor_tier {
             request = request.header("X-Takos-Executor-Tier", executor_tier.to_string());
@@ -625,30 +662,154 @@ impl ControlRpcClient {
         if let Some(executor_container_id) = &self.executor_container_id {
             request = request.header("X-Takos-Executor-Container-Id", executor_container_id);
         }
-        let response = request.json(&body).send().await?;
-        Self::decode_response(path, response).await
+        // When the operator has provisioned an internal HMAC key, attach a
+        // signed envelope (capability, actor context, body digest, nonce,
+        // timestamp). The receiver on takos/app must independently verify the
+        // signature via `verify_internal_rpc` before trusting the bearer.
+        if let Some(secret) = self.internal_rpc_key.as_deref() {
+            let request_id = format!("agent-{}-{}", self.run_id, uuid::Uuid::new_v4());
+            let nonce = format!(
+                "agent-{}-{}",
+                self.run_id,
+                self.nonce_counter.fetch_add(1, Ordering::Relaxed),
+            );
+            let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+            let actor = TakosActorContext {
+                actor_account_id: CONTROL_RPC_INTERNAL_CALLER.into(),
+                space_id: None,
+                roles: vec!["agent".into()],
+                request_id: request_id.clone(),
+                principal_kind: Some("service".into()),
+                service_id: Some(self.service_id.clone()),
+                agent_id: Some(self.run_id.clone()),
+            };
+            let signed = sign_internal_rpc(&InternalRpcSignInput {
+                method: "POST",
+                path,
+                query: None,
+                body: &body_string,
+                actor: &actor,
+                caller: CONTROL_RPC_INTERNAL_CALLER,
+                audience: CONTROL_RPC_INTERNAL_AUDIENCE,
+                capabilities: &[CONTROL_RPC_INTERNAL_CAPABILITY],
+                request_id: Some(&request_id),
+                nonce: &nonce,
+                timestamp: &timestamp,
+                secret,
+            })
+            .map_err(io::Error::other)?;
+            for (name, value) in signed.headers {
+                request = request.header(name, value);
+            }
+        }
+        let response = request.body(body_bytes).send().await?;
+        match Self::decode_response::<T>(path, response).await {
+            Ok(value) => Ok(value),
+            Err(err) => Err(Box::new(err) as Box<dyn std::error::Error + Send + Sync>),
+        }
     }
 
     async fn decode_response<T: DeserializeOwned>(
         path: &str,
         response: reqwest::Response,
-    ) -> AppResult<T> {
+    ) -> Result<T, ControlRpcError> {
         let status = response.status();
-        let text = response.text().await?;
+        let text = response.text().await.map_err(|err| ControlRpcError {
+            kind: ControlRpcErrorKind::Network,
+            status: Some(status),
+            message: format!("{path} response read failed: {err}"),
+        })?;
         if !status.is_success() {
+            let kind = ControlRpcErrorKind::from_response(status, &text);
             let detail = if text.is_empty() {
                 status.to_string()
             } else {
                 format!("{status} {text}")
             };
-            return Err(io::Error::other(format!("{path} failed: {detail}")).into());
+            return Err(ControlRpcError {
+                kind,
+                status: Some(status),
+                message: format!("{path} failed: {detail}"),
+            });
         }
-        serde_json::from_str(&text).map_err(|err| {
-            io::Error::other(format!(
-                "failed to decode {path} response: {err}; body={text}"
-            ))
-            .into()
+        serde_json::from_str(&text).map_err(|err| ControlRpcError {
+            kind: ControlRpcErrorKind::Other,
+            status: Some(status),
+            message: format!("failed to decode {path} response: {err}; body={text}"),
         })
+    }
+}
+
+/// Classification used by callers to react to specific control-plane failures
+/// (lease loss vs. transient network vs. unknown). Replaces the previous
+/// substring match on the formatted error message so a stray "Lease lost" in
+/// an unrelated server response cannot cancel a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlRpcErrorKind {
+    /// HTTP 409 + a structured "Lease lost" signal from the executor.
+    LeaseLost,
+    /// HTTP 409 from the control plane that is not a lease-lost case.
+    Conflict,
+    /// HTTP 404 from the control plane.
+    NotFound,
+    /// Transport / I/O failure before a structured status was obtained.
+    Network,
+    /// Any other failure.
+    Other,
+}
+
+impl ControlRpcErrorKind {
+    /// Map an HTTP status + response body into a structured error kind. The
+    /// body is parsed as JSON when possible and checked for the
+    /// `error == "lease_lost"` shape that takos/app emits; we fall back to a
+    /// case-sensitive substring check for the wire-format compatibility window.
+    pub fn from_response(status: StatusCode, body: &str) -> Self {
+        if status == StatusCode::CONFLICT {
+            if let Ok(value) = serde_json::from_str::<Value>(body) {
+                let error_code = value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(str::to_ascii_lowercase);
+                if matches!(
+                    error_code.as_deref(),
+                    Some("lease_lost") | Some("lease-lost")
+                ) {
+                    return Self::LeaseLost;
+                }
+            }
+            // Compatibility with control planes that have not yet adopted the
+            // structured `error` field but still emit the canonical reason.
+            if body.contains("Lease lost") || body.contains("lease_lost") {
+                return Self::LeaseLost;
+            }
+            return Self::Conflict;
+        }
+        if status == StatusCode::NOT_FOUND {
+            return Self::NotFound;
+        }
+        Self::Other
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ControlRpcError {
+    pub kind: ControlRpcErrorKind,
+    pub status: Option<StatusCode>,
+    pub message: String,
+}
+
+impl fmt::Display for ControlRpcError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ControlRpcError {}
+
+impl ControlRpcError {
+    /// Convenience predicate for callers that only care about lease-loss.
+    pub fn is_lease_lost(&self) -> bool {
+        matches!(self.kind, ControlRpcErrorKind::LeaseLost)
     }
 }
 
@@ -697,11 +858,33 @@ fn nonempty_env(key: &str) -> Option<String> {
     env::var(key).ok().filter(|value| !value.trim().is_empty())
 }
 
+/// Decides whether a heartbeat / control-plane RPC error reflects the
+/// scheduler having taken the lease away. Prefers the structured
+/// [`ControlRpcError`] classification; falls back to a tightened substring
+/// check (status 409 conjunction with "Lease lost") for legacy error sources
+/// so unrelated 409 paths or stray log lines cannot misclassify transient
+/// failures.
 pub fn is_lease_lost(error: &(dyn std::error::Error + 'static)) -> bool {
-    error
-        .to_string()
-        .contains(&StatusCode::CONFLICT.as_u16().to_string())
-        || error.to_string().contains("Lease lost")
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(source) = current {
+        if let Some(typed) = source.downcast_ref::<ControlRpcError>() {
+            return typed.is_lease_lost();
+        }
+        current = source.source();
+    }
+    let message = error.to_string();
+    if !message.contains("Lease lost") {
+        return false;
+    }
+    let conflict_code = StatusCode::CONFLICT.as_u16().to_string();
+    let conflict_token = format!(" {conflict_code} ");
+    let conflict_phrase = StatusCode::CONFLICT
+        .canonical_reason()
+        .map(|reason| format!("{conflict_code} {reason}"))
+        .unwrap_or_else(|| format!("{conflict_code} Conflict"));
+    message.contains(&conflict_token)
+        || message.contains(&conflict_phrase)
+        || message.contains(&format!("status:{conflict_code}"))
 }
 
 fn string_field(payload: &Value, keys: &[&str]) -> Option<String> {
@@ -765,9 +948,10 @@ fn activated_skill_array_field(payload: &Value, keys: &[&str]) -> Vec<ActivatedS
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_run_config_response, resolve_control_rpc_config, ControlRpcClient, RunBootstrap,
-        StartPayload,
+        is_lease_lost, parse_run_config_response, resolve_control_rpc_config, ControlRpcClient,
+        ControlRpcError, ControlRpcErrorKind, RunBootstrap, StartPayload,
     };
+    use reqwest::StatusCode;
     use serde_json::json;
     use std::env;
     use std::io::{Read, Write};
@@ -776,6 +960,52 @@ mod tests {
     use std::thread;
 
     static CONTROL_RPC_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn control_rpc_error_kind_classifies_structured_lease_lost_payload() {
+        assert_eq!(
+            ControlRpcErrorKind::from_response(
+                StatusCode::CONFLICT,
+                r#"{"error":"lease_lost","detail":"replaced"}"#,
+            ),
+            ControlRpcErrorKind::LeaseLost,
+        );
+        assert_eq!(
+            ControlRpcErrorKind::from_response(StatusCode::CONFLICT, r#"{"error":"in_progress"}"#,),
+            ControlRpcErrorKind::Conflict,
+        );
+        assert_eq!(
+            ControlRpcErrorKind::from_response(StatusCode::CONFLICT, "Lease lost"),
+            ControlRpcErrorKind::LeaseLost,
+        );
+        assert_eq!(
+            ControlRpcErrorKind::from_response(StatusCode::NOT_FOUND, ""),
+            ControlRpcErrorKind::NotFound,
+        );
+        assert_eq!(
+            ControlRpcErrorKind::from_response(StatusCode::INTERNAL_SERVER_ERROR, "boom",),
+            ControlRpcErrorKind::Other,
+        );
+    }
+
+    #[test]
+    fn is_lease_lost_prefers_structured_error_over_substring() {
+        let typed_error: Box<dyn std::error::Error + Send + Sync> = Box::new(ControlRpcError {
+            kind: ControlRpcErrorKind::LeaseLost,
+            status: Some(StatusCode::CONFLICT),
+            // Deliberately omit the "Lease lost" substring so we know the
+            // downcast — not the legacy string match — drove the result.
+            message: "control-plane reported takeover".to_string(),
+        });
+        assert!(is_lease_lost(typed_error.as_ref()));
+
+        let not_lease: Box<dyn std::error::Error + Send + Sync> = Box::new(ControlRpcError {
+            kind: ControlRpcErrorKind::Conflict,
+            status: Some(StatusCode::CONFLICT),
+            message: "409 Conflict {\"error\":\"in_progress\"}".to_string(),
+        });
+        assert!(!is_lease_lost(not_lease.as_ref()));
+    }
 
     #[test]
     fn run_bootstrap_accepts_app_installation_context() {
