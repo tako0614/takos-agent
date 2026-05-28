@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::StatusCode;
@@ -14,6 +15,18 @@ use crate::AppResult;
 /// Default `OpenAI` Chat Completions endpoint. Centralised so the `mock-llm`
 /// feature can override it without editing the production code path.
 const DEFAULT_OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
+
+/// Connect + read timeout for outbound LLM calls. Matches the default that
+/// `takos_agent_engine::model::openai_chat::OpenAiChatConfig` uses so the two
+/// runners observe the same upstream behaviour.
+const MODEL_HTTP_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn build_model_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(MODEL_HTTP_TIMEOUT)
+        .build()
+        .expect("OpenAI reqwest client builder must produce a client with default TLS")
+}
 
 /// Returns the model endpoint, preferring the `TAKOS_AGENT_MODEL_ENDPOINT`
 /// environment variable over the compiled-in default.
@@ -67,7 +80,7 @@ impl TakosModelRunner {
     ) -> Self {
         let resolved_model = get_model_name_override().unwrap_or_else(|| model.into());
         Self {
-            client: reqwest::Client::new(),
+            client: build_model_http_client(),
             model: resolved_model,
             temperature,
             openai_api_keys: Arc::new(sanitize_api_keys(openai_api_keys)),
@@ -92,7 +105,7 @@ impl TakosModelRunner {
         usage_tracker: Arc<UsageTracker>,
     ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: build_model_http_client(),
             model: model.into(),
             temperature,
             openai_api_keys: Arc::new(sanitize_api_keys(openai_api_keys)),

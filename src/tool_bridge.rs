@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -7,6 +9,7 @@ use takos_agent_engine::model::ToolCallRequest;
 use takos_agent_engine::tools::executor::{DefaultToolExecutor, ToolCallResult, ToolExecutor};
 use takos_agent_engine::tools::memory_tools::MemoryTools;
 use takos_agent_engine::{EngineError, Result};
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::control_rpc::{ControlRpcClient, RpcToolResult, SkillCatalogResponse, ToolDefinition};
@@ -18,6 +21,13 @@ const LOCAL_MEMORY_TOOL_NAMES: [&str; 4] = [
     "provenance_lookup",
     "timeline_search",
 ];
+
+/// Operator-managed allowlist of tool names that the agent is permitted to
+/// dispatch. Read from `TAKOS_AGENT_TOOL_ALLOWLIST` (comma-separated) at the
+/// time each call is evaluated. **The default is empty** — operators MUST opt
+/// in, otherwise every non-local tool call is rejected with the
+/// `tool_not_permitted` error. Set the env to `*` to allow every remote tool.
+const TOOL_ALLOWLIST_ENV_KEY: &str = "TAKOS_AGENT_TOOL_ALLOWLIST";
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ToolExecutionRecord {
@@ -38,6 +48,7 @@ pub struct CompositeToolExecutor {
     local_executor: Option<Arc<DefaultToolExecutor>>,
     tool_executions: Arc<Mutex<Vec<ToolExecutionRecord>>>,
     tool_call_sequence: Arc<AtomicU64>,
+    cancellation_token: Option<CancellationToken>,
 }
 
 impl CompositeToolExecutor {
@@ -53,11 +64,20 @@ impl CompositeToolExecutor {
             local_executor: None,
             tool_executions: Arc::new(Mutex::new(Vec::new())),
             tool_call_sequence: Arc::new(AtomicU64::new(1)),
+            cancellation_token: None,
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_local_memory_tools(mut self, memory_tools: MemoryTools) -> Self {
         self.local_executor = Some(Arc::new(DefaultToolExecutor::new(memory_tools)));
+        self
+    }
+
+    /// Wire the run's cancellation token so in-flight remote tool dispatches
+    /// can be aborted when the executor lease is lost or the run is cancelled.
+    pub fn with_cancellation_token(mut self, token: CancellationToken) -> Self {
+        self.cancellation_token = Some(token);
         self
     }
 
@@ -68,6 +88,36 @@ impl CompositeToolExecutor {
     pub fn take_tool_executions(&self) -> Vec<ToolExecutionRecord> {
         let mut guard = lock_tool_executions(&self.tool_executions);
         std::mem::take(&mut *guard)
+    }
+}
+
+/// Compute the active allowlist for remote tool dispatch. `None` indicates
+/// the operator has not configured the env so every remote tool MUST be
+/// rejected. `Some(set)` with a literal `*` entry means "allow every remote
+/// tool"; otherwise the set holds the exact allowed names. Local memory and
+/// local skill tools are always permitted (they execute in-process under the
+/// agent's own authority).
+fn resolve_tool_allowlist() -> Option<HashSet<String>> {
+    let raw = env::var(TOOL_ALLOWLIST_ENV_KEY).ok()?;
+    let entries: HashSet<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect();
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
+}
+
+fn is_tool_allowed(tool_name: &str, allowlist: Option<&HashSet<String>>) -> bool {
+    match allowlist {
+        // Default is empty — no remote tool can run unless the operator opts
+        // in by setting TAKOS_AGENT_TOOL_ALLOWLIST.
+        None => false,
+        Some(set) => set.contains("*") || set.contains(tool_name),
     }
 }
 
@@ -96,6 +146,31 @@ impl ToolExecutor for CompositeToolExecutor {
             return self
                 .execute_local_skill(&tool_call_id, &tool_name, &tool_arguments)
                 .await;
+        }
+
+        // Remote tool dispatch is gated by the operator-managed allowlist.
+        // An unset / empty `TAKOS_AGENT_TOOL_ALLOWLIST` means *no* remote
+        // tools are callable — operators must explicitly opt in.
+        let allowlist = resolve_tool_allowlist();
+        if !is_tool_allowed(&tool_name, allowlist.as_ref()) {
+            let error = format!("tool_not_permitted: {tool_name}");
+            self.client
+                .emit_run_event(
+                    "tool_result",
+                    tool_result_event(&tool_call_id, &tool_name, &error, "", Some(&error)),
+                )
+                .await
+                .ok();
+            self.record_tool_execution(ToolExecutionRecord {
+                tool_call_id: tool_call_id.clone(),
+                name: tool_name.clone(),
+                arguments: tool_arguments.clone(),
+                summary: error.clone(),
+                result: None,
+                output: String::new(),
+                error: Some(error.clone()),
+            });
+            return Err(EngineError::Tool(error));
         }
 
         self.execute_remote_tool(&tool_call_id, &tool_name, &tool_arguments)
@@ -165,11 +240,48 @@ impl CompositeToolExecutor {
             .await
             .ok();
 
-        let rpc_result = match self
-            .client
-            .tool_execute(tool_name, tool_arguments.clone())
-            .await
-        {
+        // Wrap the upstream call in `tokio::select!` against the run's
+        // cancellation token so an executor lease loss or a cancelled run
+        // aborts the in-flight request future instead of waiting for the HTTP
+        // timeout. When no token is wired (test paths) we simply await.
+        let execute_future = self.client.tool_execute(tool_name, tool_arguments.clone());
+        let rpc_outcome = if let Some(token) = self.cancellation_token.clone() {
+            tokio::select! {
+                biased;
+                () = token.cancelled() => {
+                    let error = "operation cancelled".to_string();
+                    let summary = format!("{tool_name} error={error}");
+                    self.client
+                        .emit_run_event(
+                            "tool_result",
+                            tool_result_event(
+                                tool_call_id,
+                                tool_name,
+                                &summary,
+                                "",
+                                Some(&error),
+                            ),
+                        )
+                        .await
+                        .ok();
+                    self.record_tool_execution(ToolExecutionRecord {
+                        tool_call_id: tool_call_id.to_string(),
+                        name: tool_name.to_string(),
+                        arguments: tool_arguments.clone(),
+                        summary,
+                        result: None,
+                        output: String::new(),
+                        error: Some(error.clone()),
+                    });
+                    return Err(EngineError::Tool(error));
+                }
+                outcome = execute_future => outcome,
+            }
+        } else {
+            execute_future.await
+        };
+
+        let rpc_result = match rpc_outcome {
             Ok(result) => result,
             Err(err) => {
                 let error = err.to_string();
@@ -430,8 +542,9 @@ fn truncate_summary(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        rpc_tool_result_output_and_error, rpc_tool_result_to_engine, stable_tool_call_id,
-        tool_result_event, truncate_summary, CompositeToolExecutor, ToolExecutionRecord,
+        is_tool_allowed, rpc_tool_result_output_and_error, rpc_tool_result_to_engine,
+        stable_tool_call_id, tool_result_event, truncate_summary, CompositeToolExecutor,
+        ToolExecutionRecord,
     };
     use crate::control_rpc::{
         ControlRpcClient, SkillCatalogResponse, StartPayload, ToolDefinition,
@@ -587,5 +700,23 @@ mod tests {
         assert_eq!(records[0].result.as_deref(), Some("ok"));
 
         assert!(executor.take_tool_executions().is_empty());
+    }
+
+    #[test]
+    fn tool_allowlist_defaults_to_denying_every_remote_tool() {
+        assert!(!is_tool_allowed("repo_list", None));
+        assert!(!is_tool_allowed("file_read", None));
+    }
+
+    #[test]
+    fn tool_allowlist_honours_explicit_names_and_wildcard() {
+        let mut set = std::collections::HashSet::new();
+        set.insert("repo_list".to_string());
+        assert!(is_tool_allowed("repo_list", Some(&set)));
+        assert!(!is_tool_allowed("runtime_exec", Some(&set)));
+
+        let mut wildcard = std::collections::HashSet::new();
+        wildcard.insert("*".to_string());
+        assert!(is_tool_allowed("any_tool_name", Some(&wildcard)));
     }
 }

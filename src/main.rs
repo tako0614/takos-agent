@@ -25,6 +25,9 @@ use takos_agent_engine::domain::LoopStatus;
 use takos_agent_engine::{run_turn_with_options, RunOptions, SessionResponse};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
+use tower::limit::ConcurrencyLimitLayer;
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 use tracing::{error, info, warn};
 
 use crate::control_rpc::{is_lease_lost, ControlRpcClient, StartPayload, UsagePayload};
@@ -40,6 +43,14 @@ pub type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 const DEFAULT_MAX_CONCURRENT_RUNS: usize = 5;
 const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 15;
+/// Maximum request body size accepted on /start. The control plane sends a
+/// small JSON envelope (run/worker/service ids, token, base URL). 64 KiB
+/// covers every realistic payload while preventing slow-body resource
+/// exhaustion. Applied via `tower_http::limit::RequestBodyLimitLayer`.
+const START_REQUEST_BODY_LIMIT_BYTES: usize = 64 * 1024;
+/// Per-request timeout applied to every axum handler. Keeps a stuck control
+/// plane from holding a connection slot for the full process lifetime.
+const REQUEST_HANDLER_TIMEOUT_SECS: u64 = 30;
 const OPENAI_MAX_TOOL_DEFINITIONS: usize = 128;
 const TOOLBOX_TOOL_NAME: &str = "toolbox";
 const CORE_DIRECT_TOOL_NAMES: [&str; 30] = [
@@ -152,31 +163,72 @@ async fn main() -> AppResult<()> {
 
     let max_concurrent_runs = parse_max_concurrent_runs(env::var("MAX_CONCURRENT_RUNS").ok());
     let state = Arc::new(ServiceState::new(data_dir, max_concurrent_runs));
+    // tower / tower-http middleware stack:
+    //   * `ConcurrencyLimitLayer` caps the total number of in-flight HTTP
+    //     handlers (separate from the run-admission counter) so a flood of
+    //     /health / malformed /start requests cannot exhaust tokio tasks.
+    //   * `RequestBodyLimitLayer` rejects bodies larger than 64 KiB on /start
+    //     to keep the process out of slow-body memory pressure.
+    //   * `TimeoutLayer` aborts handlers that exceed
+    //     `REQUEST_HANDLER_TIMEOUT_SECS` so a stalled connection cannot keep
+    //     a slot pinned forever.
     let app = Router::new()
         .route("/health", get(health))
         .route("/start", post(start))
-        .with_state(state);
+        .with_state(state)
+        .layer(RequestBodyLimitLayer::new(START_REQUEST_BODY_LIMIT_BYTES))
+        .layer(TimeoutLayer::new(Duration::from_secs(
+            REQUEST_HANDLER_TIMEOUT_SECS,
+        )))
+        .layer(ConcurrencyLimitLayer::new(max_concurrent_runs.max(1) * 8));
 
     let port = env::var("PORT")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
         .unwrap_or(8080);
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-    info!(port, "takos-agent listening");
+    // Safer default: bind to loopback. Operators on managed deployments where
+    // the listener is fronted by an internal proxy must explicitly opt in with
+    // `TAKOS_AGENT_BIND_PUBLIC=true` to listen on all interfaces. This avoids
+    // accidentally exposing /start (a privileged endpoint) on the public
+    // network during local development or misconfigured rollouts.
+    let bind_public = matches!(
+        env::var("TAKOS_AGENT_BIND_PUBLIC")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("true") | Some("1") | Some("yes"),
+    );
+    let bind_host: &str = if bind_public { "0.0.0.0" } else { "127.0.0.1" };
+    let listener = tokio::net::TcpListener::bind((bind_host, port)).await?;
+    info!(port, host = bind_host, "takos-agent listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
 
 async fn health(State(state): State<Arc<ServiceState>>) -> Json<Value> {
-    Json(json!({
+    // Concurrent-run counts are operator-only diagnostics. Hide them unless
+    // `TAKOS_AGENT_HEALTH_INCLUDE_COUNTS=true` is explicitly set so an
+    // unauthenticated probe cannot fingerprint capacity / load. The minimal
+    // payload is sufficient for liveness checks.
+    let include_counts = matches!(
+        env::var("TAKOS_AGENT_HEALTH_INCLUDE_COUNTS")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("true") | Some("1") | Some("yes"),
+    );
+    let mut payload = json!({
         "status": "ok",
         "service": "takos-agent",
-        "runs": {
+    });
+    if include_counts {
+        payload["runs"] = json!({
             "active": state.active_run_count(),
             "max": state.max_concurrent_runs,
             "available": state.available_run_slots(),
-        },
-    }))
+        });
+    }
+    Json(payload)
 }
 
 async fn start(
@@ -416,11 +468,16 @@ async fn execute_run(payload: StartPayload, state: Arc<ServiceState>) -> AppResu
     let embedding_config =
         resolve_embedding_backend_config(&run_config, api_keys.openai.as_deref())?;
     let usage_tracker = Arc::new(engine_support::UsageTracker::default());
+    // The cancellation token is created here (before the executor) so the
+    // tool bridge can abort in-flight remote tool calls when the run is
+    // cancelled or the executor lease is lost downstream.
+    let cancellation_token = CancellationToken::new();
     let composite_tool_executor = CompositeToolExecutor::new(
         client.clone(),
         tool_catalog.tools.clone(),
         manual_catalog.clone(),
-    );
+    )
+    .with_cancellation_token(cancellation_token.clone());
     let exposed_tools = select_model_tools(&composite_tool_executor.exposed_tools());
     let model_runner = TakosModelRunner::new_with_openai_api_keys(
         payload.resolved_model(),
@@ -464,7 +521,6 @@ async fn execute_run(payload: StartPayload, state: Arc<ServiceState>) -> AppResu
         .await
         .ok();
 
-    let cancellation_token = CancellationToken::new();
     let heartbeat_handle = tokio::spawn(heartbeat_loop(
         client.clone(),
         cancellation_token.clone(),
@@ -687,17 +743,79 @@ async fn handle_failure(
 }
 
 fn sanitize_failure_error_message(message: &str) -> String {
-    message
+    let mut parts: Vec<String> = message
         .split_whitespace()
         .map(|part| {
-            if part.contains("sk-") {
-                "<redacted>"
+            if part_contains_secret_token(part) || looks_like_email(part) {
+                "<redacted>".to_string()
             } else {
-                part
+                part.to_string()
             }
         })
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect();
+    // Bearer tokens follow the literal "Bearer <token>" pattern with a space,
+    // so the per-part scan above only covers the token. Walk pairs of parts to
+    // also redact the trailing token when the preceding part is `Bearer`.
+    let mut index = 0;
+    while index < parts.len() {
+        if parts[index].eq_ignore_ascii_case("bearer") {
+            if index + 1 < parts.len() && parts[index + 1] != "<redacted>" {
+                parts[index + 1] = "<redacted>".to_string();
+            }
+        }
+        index += 1;
+    }
+    parts.join(" ")
+}
+
+fn part_contains_secret_token(part: &str) -> bool {
+    // Common provider key shapes. Substring (not whole-token) so embedded
+    // tokens inside JSON-like fragments (`"key":"sk-…"`) are still redacted.
+    const PREFIX_NEEDLES: &[&str] = &["sk-", "sk_live_", "sk_test_", "ghp_"];
+    for needle in PREFIX_NEEDLES {
+        if part.contains(needle) {
+            return true;
+        }
+    }
+    // AWS access key id: literal "AKIA" + 16 base32-ish chars [0-9A-Z]. Scan
+    // every starting index because the token may be embedded in a longer
+    // word (e.g. JSON quoting).
+    let bytes = part.as_bytes();
+    if bytes.len() >= 20 {
+        for start in 0..=bytes.len().saturating_sub(20) {
+            if &bytes[start..start + 4] == b"AKIA"
+                && bytes[start + 4..start + 20]
+                    .iter()
+                    .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase())
+            {
+                return true;
+            }
+        }
+    }
+    // JWT-shaped: `eyJ...` (base64url of a JSON header). Require the prefix
+    // plus at least one dot to avoid matching arbitrary words.
+    if part.contains("eyJ") && part.contains('.') {
+        return true;
+    }
+    false
+}
+
+fn looks_like_email(part: &str) -> bool {
+    // Naive shape check: contains exactly one '@' surrounded by non-empty
+    // local / domain parts and the domain has at least one dot. Stricter
+    // grammars need regex; the heuristic is enough for error-message scrub.
+    let Some(at) = part.find('@') else {
+        return false;
+    };
+    if part.matches('@').count() != 1 {
+        return false;
+    }
+    let (local, rest) = part.split_at(at);
+    let domain = &rest[1..];
+    if local.is_empty() || domain.is_empty() {
+        return false;
+    }
+    domain.contains('.') && domain.bytes().all(|byte| !byte.is_ascii_whitespace())
 }
 
 fn user_visible_failure_message(error: &str) -> String {
@@ -912,6 +1030,41 @@ mod tests {
         );
         assert!(!message.contains("sk-secret"));
         assert!(message.contains("<redacted>"));
+    }
+
+    #[test]
+    fn sanitizer_redacts_bearer_provider_aws_jwt_and_email_tokens() {
+        let message = sanitize_failure_error_message(
+            "request denied Authorization: Bearer eyJabc.def Bearer plain-token openai \
+             sk_live_AAA1 stripe sk_test_BBB github ghp_CCCCCCCC aws \
+             AKIAABCDEFGHIJKLMNOP jwt eyJhbGciOi.JIUzI1.NiJ9 user user@example.com",
+        );
+
+        // Bearer-prefixed tokens are scrubbed.
+        assert!(!message.contains("eyJabc.def"));
+        assert!(!message.contains("plain-token"));
+        // Provider key prefixes.
+        assert!(!message.contains("sk_live_AAA1"));
+        assert!(!message.contains("sk_test_BBB"));
+        assert!(!message.contains("ghp_CCCCCCCC"));
+        // AWS access key id.
+        assert!(!message.contains("AKIAABCDEFGHIJKLMNOP"));
+        // JWT-shaped token outside Bearer header.
+        assert!(!message.contains("eyJhbGciOi.JIUzI1.NiJ9"));
+        // Email pattern.
+        assert!(!message.contains("user@example.com"));
+        // Bearer scheme word is preserved (only the token is scrubbed).
+        assert!(message.contains("Bearer <redacted>"));
+    }
+
+    #[test]
+    fn sanitizer_keeps_innocuous_text_intact() {
+        let message =
+            sanitize_failure_error_message("request failed because of network timeout, http 503");
+        assert_eq!(
+            message,
+            "request failed because of network timeout, http 503",
+        );
     }
 
     #[test]
