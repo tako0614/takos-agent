@@ -68,7 +68,6 @@ impl CompositeToolExecutor {
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_local_memory_tools(mut self, memory_tools: MemoryTools) -> Self {
         self.local_executor = Some(Arc::new(DefaultToolExecutor::new(memory_tools)));
         self
@@ -457,72 +456,6 @@ async fn emit_tool_call_event(
         .emit_run_event("tool_call", tool_call_event(tool_call_id, name, arguments))
         .await
         .map_err(|_| ())
-}
-
-#[allow(dead_code)]
-pub fn local_memory_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
-        ToolDefinition {
-            name: "semantic_search_memory".to_string(),
-            description: "Search raw and abstract memory using semantic similarity.".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Search query text." },
-                    "target": {
-                        "type": "string",
-                        "description": "Which memory layer to search.",
-                        "enum": ["raw", "abstract", "both"]
-                    },
-                    "top_k": { "type": "number", "description": "Maximum number of hits." },
-                    "threshold": { "type": "number", "description": "Minimum cosine similarity threshold." }
-                },
-                "required": ["query"]
-            }),
-        },
-        ToolDefinition {
-            name: "graph_search_memory".to_string(),
-            description: "Traverse abstract-memory relations from a starting abstract node."
-                .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "start_node_id": { "type": "string", "description": "Abstract node ID to start traversal from." },
-                    "max_depth": { "type": "number", "description": "Traversal depth." },
-                    "relation_types": {
-                        "type": "array",
-                        "description": "Optional relation-type filter.",
-                        "items": { "type": "string", "description": "Relation type." }
-                    }
-                },
-                "required": ["start_node_id"]
-            }),
-        },
-        ToolDefinition {
-            name: "provenance_lookup".to_string(),
-            description: "Resolve the raw-node provenance for one abstract memory node."
-                .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "abstract_node_id": { "type": "string", "description": "Abstract node ID." }
-                },
-                "required": ["abstract_node_id"]
-            }),
-        },
-        ToolDefinition {
-            name: "timeline_search".to_string(),
-            description: "Read raw memory in timestamp order, optionally scoped to one session."
-                .to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "session_id": { "type": "string", "description": "Optional session UUID." },
-                    "limit": { "type": "number", "description": "Maximum number of raw nodes to return." }
-                }
-            }),
-        },
-    ]
 }
 
 fn truncate_summary(output: &str) -> String {

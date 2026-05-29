@@ -145,13 +145,6 @@ pub struct ActivatedSkill {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Default)]
-pub struct SkillPlanResponse {
-    pub locale: String,
-    pub activated_skills: Vec<ActivatedSkill>,
-}
-
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillResolutionContext {
@@ -360,92 +353,6 @@ impl ControlRpcClient {
             }),
         )
         .await
-    }
-
-    #[allow(dead_code)]
-    pub async fn skill_plan(
-        &self,
-        thread_id: &str,
-        space_id: &str,
-        agent_type: &str,
-        history: &[HistoryMessage],
-        available_tool_names: &[String],
-    ) -> AppResult<SkillPlanResponse> {
-        let payload: Value = self
-            .post_control_json(
-                "skill-plan",
-                json!({
-                    "runId": self.run_id,
-                    "threadId": thread_id,
-                    "spaceId": space_id,
-                    "agentType": agent_type,
-                    "history": history,
-                    "availableToolNames": available_tool_names,
-                }),
-            )
-            .await?;
-
-        let activated_skills = payload
-            .get("activatedSkills")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|value| serde_json::from_value::<ActivatedSkill>(value).ok())
-            .collect();
-
-        Ok(SkillPlanResponse {
-            locale: string_field(&payload, &["locale", "skillLocale"])
-                .unwrap_or_else(|| "en".to_string()),
-            activated_skills,
-        })
-    }
-
-    #[allow(dead_code)]
-    pub async fn skill_catalog(
-        &self,
-        thread_id: &str,
-        space_id: &str,
-        agent_type: &str,
-        history: &[HistoryMessage],
-        available_tool_names: &[String],
-    ) -> AppResult<SkillCatalogResponse> {
-        let payload: Value = self
-            .post_control_json(
-                "skill-catalog",
-                json!({
-                    "runId": self.run_id,
-                    "threadId": thread_id,
-                    "spaceId": space_id,
-                    "agentType": agent_type,
-                    "history": history,
-                    "availableToolNames": available_tool_names,
-                }),
-            )
-            .await?;
-
-        let skills = payload
-            .get("skills")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|value| serde_json::from_value::<ActivatedSkill>(value).ok())
-            .collect();
-
-        let resolution_context = payload
-            .get("resolutionContext")
-            .cloned()
-            .or_else(|| payload.get("resolution_context").cloned())
-            .and_then(|value| serde_json::from_value::<SkillResolutionContext>(value).ok())
-            .unwrap_or_default();
-
-        Ok(SkillCatalogResponse {
-            locale: string_field(&payload, &["locale"]).unwrap_or_else(|| "en".to_string()),
-            skills,
-            resolution_context,
-            managed_source: Some("control".to_string()),
-        })
     }
 
     pub async fn skill_runtime_context(
