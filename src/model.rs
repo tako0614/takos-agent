@@ -54,23 +54,6 @@ pub struct TakosModelRunner {
 }
 
 impl TakosModelRunner {
-    #[allow(dead_code)]
-    pub fn new(
-        model: impl Into<String>,
-        temperature: Option<f32>,
-        openai_api_key: Option<String>,
-        tools: Vec<ToolDefinition>,
-        usage_tracker: Arc<UsageTracker>,
-    ) -> Self {
-        Self::new_with_openai_api_keys(
-            model,
-            temperature,
-            openai_api_key.into_iter().collect(),
-            tools,
-            usage_tracker,
-        )
-    }
-
     pub fn new_with_openai_api_keys(
         model: impl Into<String>,
         temperature: Option<f32>,

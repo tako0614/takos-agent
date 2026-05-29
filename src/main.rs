@@ -139,6 +139,39 @@ impl ServiceState {
     }
 }
 
+/// RAII guard that releases a registered run slot on every exit path of the
+/// spawned run task — success, error, and panic-unwind. `finish_run` uses
+/// `HashSet::remove`, so it is idempotent and a double release is harmless.
+struct RunSlotGuard {
+    state: Arc<ServiceState>,
+    run_id: String,
+}
+
+impl Drop for RunSlotGuard {
+    fn drop(&mut self) {
+        self.state.finish_run(&self.run_id);
+    }
+}
+
+/// RAII guard that aborts a spawned task on drop, including on panic-unwind.
+///
+/// The heartbeat task renews the control-plane executor lease and is otherwise
+/// only stopped via its `CancellationToken`. If the future it guards (the run)
+/// unwinds, the explicit `cancel()`/`await` on the normal path is skipped, so
+/// without this guard the heartbeat task is detached on `JoinHandle` drop and
+/// keeps renewing the lease for a dead run. `Drop` aborts the task to reap it
+/// deterministically; the normal path disarms the guard with `take()` and
+/// awaits the handle instead.
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
 fn lock_active_runs(active_runs: &Mutex<HashSet<String>>) -> MutexGuard<'_, HashSet<String>> {
     active_runs.lock().unwrap_or_else(|poisoned| {
         warn!("run registry lock poisoned; recovering current registry");
@@ -276,14 +309,21 @@ async fn start(
     let run_id_for_task = run_id.clone();
     let state_for_task = state;
     tokio::spawn(async move {
-        if let Err(err) = execute_run(payload_for_task.clone(), state_for_task.clone()).await {
+        // The guard releases the run slot on success, error, AND panic-unwind,
+        // so a panic in execute_run (or anything it awaits) can no longer leak
+        // a permanent run slot.
+        let _slot = RunSlotGuard {
+            state: state_for_task.clone(),
+            run_id: run_id_for_task,
+        };
+        if let Err(err) = execute_run(payload_for_task.clone(), state_for_task).await {
             error!(error = %err, "run execution failed");
             if let Ok(client) = ControlRpcClient::new(&payload_for_task) {
                 let _ = client.tool_cleanup().await;
                 let _ = handle_failure(&client, None, err.as_ref(), UsagePayload::default()).await;
             }
         }
-        state_for_task.finish_run(&run_id_for_task);
+        // `_slot` drops here, releasing the run slot.
     });
 
     (
@@ -528,6 +568,16 @@ async fn execute_run(payload: StartPayload, state: Arc<ServiceState>) -> AppResu
             env::var("TAKOS_AGENT_HEARTBEAT_INTERVAL_SECS").ok(),
         )),
     ));
+    // Cancel the heartbeat loop on EVERY exit path, including a panic-unwind in
+    // `run_turn_with_options`. On the normal/Err paths the explicit
+    // `cancellation_token.cancel()` below already fired and `cancel` is
+    // idempotent, so this guard's drop is a harmless no-op; on unwind it is the
+    // only thing that signals the loop to break instead of renewing the lease
+    // for a dead run forever.
+    let _cancel_on_unwind = cancellation_token.clone().drop_guard();
+    // Reap the detached heartbeat task on unwind. The normal path below disarms
+    // this guard (takes the handle out) and awaits the handle explicitly.
+    let mut heartbeat_guard = AbortOnDrop(Some(heartbeat_handle));
     client
         .emit_run_event(
             "thinking",
@@ -548,7 +598,9 @@ async fn execute_run(payload: StartPayload, state: Arc<ServiceState>) -> AppResu
     )
     .await;
     cancellation_token.cancel();
-    let _ = heartbeat_handle.await;
+    if let Some(handle) = heartbeat_guard.0.take() {
+        let _ = handle.await;
+    }
 
     let usage = model_runner.usage_payload();
     client
@@ -588,9 +640,14 @@ async fn execute_run(payload: StartPayload, state: Arc<ServiceState>) -> AppResu
             .await?;
         }
         Err(err) => {
+            // The failure is now finalized with the correct usage and the error
+            // run-event has already been emitted. Returning Ok keeps the outer
+            // fallback from re-reporting it with zeroed usage. If reporting
+            // itself fails, `?` above still propagates Err so the outer
+            // last-resort net fires.
             handle_failure(&client, Some(&bootstrap.thread_id), &err, usage).await?;
             cleanup_result.ok();
-            return Err(Box::new(err));
+            return Ok(());
         }
     }
 

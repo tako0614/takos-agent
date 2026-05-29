@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -48,6 +47,15 @@ pub struct SignedInternalRpc {
     pub headers: Vec<(String, String)>,
 }
 
+// The agent only *signs* outbound internal RPCs (see `sign_internal_rpc`,
+// wired from `control_rpc.rs`). It never receives signed envelopes to verify —
+// the `/start` webhook authenticates with a plain bearer token in `main.rs`.
+// The verify side below therefore has no production caller; it is kept solely
+// as the round-trip counterpart that proves the signing contract in tests, so
+// it is gated behind `#[cfg(test)]` rather than left to rot under a blanket
+// `#[allow(dead_code)]`. If an inbound HMAC-verified surface is ever added to
+// the agent, move this back to a normal `pub` item and wire it there.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct InternalRpcVerifyInput<'a> {
     pub method: &'a str,
@@ -63,6 +71,7 @@ pub struct InternalRpcVerifyInput<'a> {
     pub max_clock_skew_ms: Option<i64>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedInternalRpc {
     pub actor: TakosActorContext,
@@ -112,6 +121,7 @@ pub fn sign_internal_rpc(input: &InternalRpcSignInput<'_>) -> Result<SignedInter
     })
 }
 
+#[cfg(test)]
 pub fn verify_internal_rpc(
     input: &InternalRpcVerifyInput<'_>,
 ) -> Result<Option<VerifiedInternalRpc>, String> {
@@ -235,6 +245,7 @@ fn encode_actor_context(actor: &TakosActorContext) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
 fn decode_actor_context(value: &str) -> Result<TakosActorContext, String> {
     let bytes = STANDARD.decode(value).map_err(|error| error.to_string())?;
     serde_json::from_slice(&bytes).map_err(|error| error.to_string())
@@ -251,6 +262,7 @@ fn normalize_capabilities(capabilities: &[&str]) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn normalize_capability_header(value: Option<&str>) -> Vec<String> {
     value
         .unwrap_or("")
@@ -263,6 +275,7 @@ fn normalize_capability_header(value: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+#[cfg(test)]
 fn read_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()
@@ -278,6 +291,7 @@ fn path_with_query(path: &str, query: Option<&str>) -> String {
     }
 }
 
+#[cfg(test)]
 fn timestamp_within_skew(
     timestamp: &str,
     now_ms: Option<i64>,
@@ -291,7 +305,10 @@ fn timestamp_within_skew(
     (now - parsed.timestamp_millis()).abs() <= skew
 }
 
+#[cfg(test)]
 fn current_time_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| {
@@ -314,6 +331,7 @@ fn hmac_sha256_hex(secret: &str, message: &str) -> Result<String, String> {
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
+#[cfg(test)]
 fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
