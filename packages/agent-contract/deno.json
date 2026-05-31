@@ -1,5 +1,5 @@
 {
-  "name": "takos-agent-contract",
+  "name": "takos-agenttakosumi-contract",
   "version": "0.1.0",
   "exports": { ".": "./src/index.ts" }
 }
